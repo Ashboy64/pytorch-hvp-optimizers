@@ -1,11 +1,10 @@
 import random
 import numpy as np
-import cvxpy as cp
 
 import torch
+import torch.nn as nn 
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.func import functional_call, vmap, grad
 
 from utils import * 
 from data import *
