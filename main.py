@@ -92,7 +92,7 @@ def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verb
 
 
 def run_experiment():
-    train_loader, val_loader, test_loader = load_data(BATCH_SIZE)
+    train_loader, val_loader, test_loader = load_mnist(BATCH_SIZE)
 
     for opt_name in OPTIMIZERS:
         seed(0)
