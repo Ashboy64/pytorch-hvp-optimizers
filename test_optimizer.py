@@ -31,13 +31,14 @@ def main():
 
         logits = model(batch_x)
         loss = criterion(logits, batch_y)
+        print(loss)
 
         optimizer.zero_grad()
         # loss.backward()
         optimizer.step(loss, model)
 
-        if batch_idx == 0:
-            break
+        # if batch_idx == 0:
+        #     break
 
 
 # This is a test to figure out what is going on in the method to compute HVPs that does 

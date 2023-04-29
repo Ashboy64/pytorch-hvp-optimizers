@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import random
 import numpy as np
 
@@ -9,6 +10,10 @@ import torch.nn.functional as F
 from utils import * 
 from data import *
 from models import * 
+from block_sketchy_sgd import * 
+
+
+OPTIMIZERS = {'Adam': optim.Adam, 'BlockSketchySGD': BlockSketchySGD}
 
 
 BATCH_SIZE = 64
@@ -38,9 +43,12 @@ def evaluate(model, val_loader):
     return val_loss, val_accuracy
 
 
-def train(model, train_loader, val_loader, num_epochs=2, lr=3e-4, verbose=False):
+def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verbose=False):
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    if opt_name != 'BlockSketchySGD':
+        optimizer = OPTIMIZERS[opt_name](model.parameters(), lr=lr)
+    else:
+        optimizer = OPTIMIZERS[opt_name](model, lr=lr)
 
     running_loss = 0.0      # Avg loss over the past 100 samples
 
@@ -58,8 +66,11 @@ def train(model, train_loader, val_loader, num_epochs=2, lr=3e-4, verbose=False)
             loss = criterion(logits, batch_y)
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if opt_name != 'BlockSketchySGD':
+                loss.backward()
+                optimizer.step()
+            else:
+                optimizer.step(loss)
 
             running_loss += loss.item()
             if (batch_idx + 1) % 100 == 0:
@@ -86,11 +97,14 @@ def run_experiment():
     print(f"Training w/ lr={LR}")
     model = MLP(28*28, 10).to(device)
 
-    train_logs = \
-        train(model, train_loader, val_loader, lr=LR, verbose=True)
-    final_val_perf = evaluate(model, val_loader)
+    # for opt_name in OPTIMIZERS:
+    for opt_name in ['BlockSketchySGD']:
+        train_logs = \
+            train(model, train_loader, val_loader, opt_name=opt_name, lr=LR, verbose=True)
+        final_val_perf = evaluate(model, val_loader)
     
-    vizualize_results(*train_logs)
+        vizualize_results(*train_logs)
+    plt.show()
 
 
 def seed(seed=0):

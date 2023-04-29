@@ -43,10 +43,10 @@ class BlockSketchySGD:
         return first_term + second_term
     
 
-    def step(self, loss_tensor, model):
+    def step(self, loss_tensor):
         # Compute gradients
         gs = torch.autograd.grad(
-            loss_tensor, model.parameters(), create_graph=True, 
+            loss_tensor, self.model.parameters(), create_graph=True, 
             retain_graph=True
         )
 
@@ -72,8 +72,7 @@ class BlockSketchySGD:
 
             # Invert using Woodbury formula and get approx Newton step
             step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
-            p.data.add_(self.lr * step)
-
+            p.data.add_(-self.lr * step)
 
 
 # OLD CODE

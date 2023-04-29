@@ -17,4 +17,4 @@ def vizualize_results(out_timesteps, out_train_loss, out_val_loss, out_val_acc):
     plt.ylabel("accuracy")
     plt.legend()
 
-    plt.show()
+    
