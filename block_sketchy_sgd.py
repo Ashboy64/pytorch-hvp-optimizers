@@ -65,14 +65,16 @@ class BlockSketchySGD:
                     retain_graph=True
                 )
                 sketch.append(hvp[0].reshape(-1,))
-            sketch = torch.stack(sketch).T
 
-            # Approx eigendecomposition of Hessian via randomized nystrom method
-            V_hat, Lam_hat = self.rand_nys_approx(sketch, vs)
+            with torch.no_grad():
+                sketch = torch.stack(sketch).T
+                
+                # Approx eigendecomposition of Hessian via randomized nystrom method
+                V_hat, Lam_hat = self.rand_nys_approx(sketch, vs)
 
-            # Invert using Woodbury formula and get approx Newton step
-            step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
-            p.data.add_(-self.lr * step)
+                # Invert using Woodbury formula and get approx Newton step
+                step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
+                p.data.add_(-self.lr * step)
 
 
 # OLD CODE

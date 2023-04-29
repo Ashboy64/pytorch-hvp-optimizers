@@ -94,16 +94,17 @@ def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verb
 def run_experiment():
     train_loader, val_loader, test_loader = load_data(BATCH_SIZE)
 
-    print(f"Training w/ lr={LR}")
-    model = MLP(28*28, 10).to(device)
-
-    # for opt_name in OPTIMIZERS:
-    for opt_name in ['BlockSketchySGD']:
+    for opt_name in OPTIMIZERS:
+        seed(0)
+        model = MLP(28*28, 10).to(device)
+        
         train_logs = \
-            train(model, train_loader, val_loader, opt_name=opt_name, lr=LR, verbose=True)
+            train(model, train_loader, val_loader, num_epochs=3, opt_name=opt_name, lr=LR, verbose=True)
         final_val_perf = evaluate(model, val_loader)
     
-        vizualize_results(*train_logs)
+        vizualize_results(opt_name, *train_logs)
+    
+    plt.legend()
     plt.show()
 
 
@@ -114,7 +115,6 @@ def seed(seed=0):
 
 
 def main():
-    seed()
     run_experiment()
 
 if __name__ == '__main__':
