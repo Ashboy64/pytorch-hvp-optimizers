@@ -1,0 +1,5 @@
+name: 'block_sketchy_sgd'
+params:
+  lr: 0.0003
+  block_rank: 5
+  rho: 0.001  # Levenberg-Marquardt regularization

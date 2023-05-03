@@ -3,6 +3,7 @@
 # - https://github.com/amirgholami/adahessian/blob/master/instruction/adahessian.py
 
 
+import numpy as np
 import torch
 
 
@@ -12,7 +13,7 @@ class BlockSketchySGD:
         self.lr = lr 
         self.model = model
         self.block_rank = block_rank
-        self.rho = rho      # Constant for Woodbury inverse
+        self.rho = rho      # Levenberg-Marquardt Regularization
     
 
     def zero_grad(self):
@@ -23,7 +24,8 @@ class BlockSketchySGD:
 
     def rand_nys_approx(self, Y, Q):    # Y is sketch, Q is test matrix (vecs of HVP)
         p = Y.shape[0] 
-        eps = 1e-6      # TODO: Set according to actual algo
+        eps = np.spacing(np.linalg.norm(Y))
+        # eps = 1e-6
         nu = (p**0.5) * eps
         
         Y_nu = Y + nu*Q 

@@ -38,7 +38,7 @@ def load_cifar10(batch_size):
     
     train_set, val_set = torch.utils.data.random_split(
         train_set,
-        [train_set_size, val_set_size]
+        [train_set_size, val_set_size],
         generator=torch.Generator().manual_seed(1)
     )
     

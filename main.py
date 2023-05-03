@@ -1,6 +1,11 @@
+import wandb
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
+
 import random
 import numpy as np
+from time import time
 
 import torch
 import torch.nn as nn 
@@ -12,14 +17,11 @@ from data import *
 from models import * 
 from block_sketchy_sgd import * 
 
-
-OPTIMIZERS = {'Adam': optim.Adam, 'BlockSketchySGD': BlockSketchySGD}
-
-
-BATCH_SIZE = 64
-LR = 3e-4
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+OPTIMIZERS = {'adam': optim.Adam, 'block_sketchy_sgd': BlockSketchySGD}
+DATASETS = {'mnist': load_mnist}
 
 
 def evaluate(model, val_loader):
@@ -37,18 +39,20 @@ def evaluate(model, val_loader):
             val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
             num_correct += (logits.argmax(1) == batch_y).sum().item()
 
-    val_loss /= len(val_loader)*BATCH_SIZE
+    val_loss /= len(val_loader) * batch_x.shape[0]
     val_accuracy = num_correct / num_total 
 
     return val_loss, val_accuracy
 
 
-def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verbose=False):
+def train(model, train_loader, val_loader, opt_config, num_epochs=2, verbose=False):
     criterion = nn.CrossEntropyLoss()
-    if opt_name != 'BlockSketchySGD':
-        optimizer = OPTIMIZERS[opt_name](model.parameters(), lr=lr)
+    opt_name = opt_config.name
+
+    if opt_name != 'block_sketchy_sgd':
+        optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_config.params)
     else:
-        optimizer = OPTIMIZERS[opt_name](model, lr=lr)
+        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params)
 
     running_loss = 0.0      # Avg loss over the past 100 samples
 
@@ -56,17 +60,30 @@ def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verb
     out_train_loss = []
     out_val_loss = []
     out_val_acc = []
+
+    timestep = 0
+    start_timestamp = time()
+    
+    # We periodically evaluate on validation data. We don't want the time taken to 
+    # do so to factor into the logged wall clock time. So we accumulate the time 
+    # taken in the val evaluations in time_to_subtract and subtract this out before 
+    # logging.
+    time_to_subtract = 0.0
     
     for epoch_idx in range(num_epochs):
         for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
+            to_log = {}
+            to_log['timestep'] = timestep
+            
             batch_x = batch_x.to(device).reshape(batch_x.shape[0], -1)
             batch_y = batch_y.to(device)
             
             logits = model(batch_x)
             loss = criterion(logits, batch_y)
+            to_log['loss'] = loss
 
             optimizer.zero_grad()
-            if opt_name != 'BlockSketchySGD':
+            if opt_name != 'block_sketchy_sgd':
                 loss.backward()
                 optimizer.step()
             else:
@@ -74,38 +91,32 @@ def train(model, train_loader, val_loader, opt_name, num_epochs=2, lr=3e-4, verb
 
             running_loss += loss.item()
             if (batch_idx + 1) % 100 == 0:
+                val_start_time = time()
+
                 val_loss, val_acc = evaluate(model, val_loader)
+                to_log['val_loss'] = val_loss
+                to_log['val_acc'] = val_acc
+
                 if verbose:
                     out_str = f'Epoch {epoch_idx} Batch num {batch_idx}: '
                     out_str = out_str + f'train_loss={running_loss / 100:.3f}, val_loss={val_loss:.3f}, '
                     out_str = out_str + f'val_acc={val_acc:.3f}'
                     print(out_str)
 
-                out_timesteps.append(len(train_loader) * BATCH_SIZE * epoch_idx + BATCH_SIZE * batch_idx)
+                out_timesteps.append(timestep)
                 out_train_loss.append(running_loss / 100)
                 out_val_loss.append(val_loss)
                 out_val_acc.append(val_acc)
 
                 running_loss = 0.0
 
+                time_to_subtract += time() - val_start_time
+
+            to_log['wall_clock_time'] = time() - start_timestamp - time_to_subtract
+            wandb.log(to_log)
+            timestep += 1
+
     return out_timesteps, out_train_loss, out_val_loss, out_val_acc
-
-
-def run_experiment():
-    train_loader, val_loader, test_loader = load_data(BATCH_SIZE)
-
-    for opt_name in OPTIMIZERS:
-        seed(0)
-        model = MLP(28*28, 10).to(device)
-        
-        train_logs = \
-            train(model, train_loader, val_loader, num_epochs=3, opt_name=opt_name, lr=LR, verbose=True)
-        final_val_perf = evaluate(model, val_loader)
-    
-        vizualize_results(opt_name, *train_logs)
-    
-    plt.legend()
-    plt.show()
 
 
 def seed(seed=0):
@@ -114,8 +125,45 @@ def seed(seed=0):
     torch.manual_seed(seed)
 
 
-def main():
-    run_experiment()
+@hydra.main(version_base=None, config_path="config", config_name="config")
+def main(cfg):
+    # Setup W&B logging
+    experiment_name = f"{cfg.optimizer.name}_{cfg.main.dataset_name}_seed_{cfg.main.seed}_lr_{cfg.optimizer.params.lr}"
+    log_config_dict = {
+        "opt_name": cfg.optimizer.name,
+        "dataset": cfg.main.dataset_name, 
+        "batch_size": cfg.main.batch_size,
+        "num_epochs": cfg.main.num_epochs,
+        "seed": cfg.main.seed, 
+        "lr": cfg.optimizer.params.lr,
+        "full_config": cfg
+    }
+
+    wandb.init(
+        project = "ee364b-final-project",
+        name    = experiment_name,
+        entity  = "ee364b-final-project",
+        config  = log_config_dict
+    )
+
+    # Run experiment
+    seed(cfg.main.seed)
+    
+    train_loader, val_loader, test_loader = DATASETS[cfg.main.dataset_name](cfg.main.batch_size)
+    model = MLP(28*28, 10).to(device)
+    
+    total_start_time = time()
+    train(model, train_loader, val_loader, 
+          num_epochs=cfg.main.num_epochs, 
+          opt_config=cfg.optimizer, 
+          verbose=True)
+
+    final_val_perf = evaluate(model, val_loader)
+    print(f"Total time taken for run: {time() - total_start_time}")
+
+    # Flush logs
+    wandb.finish()
+
 
 if __name__ == '__main__':
     main()
