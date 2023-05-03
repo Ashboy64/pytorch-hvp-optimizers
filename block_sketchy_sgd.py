@@ -1,6 +1,7 @@
 # References:
-# - https://mcneela.github.io/machine_learning/2019/09/03/Writing-Your-Own-Optimizers-In-Pytorch.html
+# - https://github.com/noahgolmant/pytorch-hessian-eigenthings
 # - https://github.com/amirgholami/adahessian/blob/master/instruction/adahessian.py
+# - https://mcneela.github.io/machine_learning/2019/09/03/Writing-Your-Own-Optimizers-In-Pytorch.html
 
 
 import numpy as np
@@ -9,11 +10,18 @@ import torch
 
 class BlockSketchySGD:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3):
+    def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100):
         self.lr = lr 
+        self.curr_lr = lr
+
         self.model = model
         self.block_rank = block_rank
         self.rho = rho      # Levenberg-Marquardt Regularization
+
+        self.step_count = 0
+        self.h_recomp_interval = h_recomp_interval
+
+        self.hessian_blocks   = [None for p in model.parameters()]
     
 
     def zero_grad(self):
@@ -23,18 +31,19 @@ class BlockSketchySGD:
     
 
     def rand_nys_approx(self, Y, Q):    # Y is sketch, Q is test matrix (vecs of HVP)
-        p = Y.shape[0] 
-        eps = np.spacing(np.linalg.norm(Y))
-        # eps = 1e-6
-        nu = (p**0.5) * eps
-        
-        Y_nu = Y + nu*Q 
-        C, _ = torch.linalg.cholesky_ex(Q.T @ Y_nu)
-        B = torch.linalg.solve_triangular(C, Y_nu.T, upper=False)
-        U, Sigma, _ = torch.linalg.svd(B.T, full_matrices=False)
-        Lam_hat = torch.clip(Sigma**2 - nu, min=0)
-        
-        return U, Lam_hat
+        with torch.no_grad():
+            p = Y.shape[0] 
+            eps = np.spacing(np.linalg.norm(Y))
+            # eps = 1e-6
+            nu = (p**0.5) * eps
+            
+            Y_nu = Y + nu*Q 
+            C, _ = torch.linalg.cholesky_ex(Q.T @ Y_nu)
+            B = torch.linalg.solve_triangular(C, Y_nu.T, upper=False)
+            U, Sigma, _ = torch.linalg.svd(B.T, full_matrices=False)
+            Lam_hat = torch.clip(Sigma**2 - nu, min=0)
+            
+            return U, Lam_hat
     
     
     def approx_newton_step(self, V_hat, Lam_hat, g):
@@ -45,6 +54,20 @@ class BlockSketchySGD:
         return first_term + second_term
     
 
+    # def get_learning_rate(self, p, g, V_hat, Lam_hat, num_iter=5):
+    #     z = torch.randn(torch.numel(p, 1))
+    #     y = z / torch.linalg.norm(z)
+
+    #     for i in range(num_iter):
+    #         v = self.approx_newton_step(V_hat, np.sqrt(Lam_hat), y)
+    #         v_prime = torch.autograd.grad(
+    #                     g, p, 
+    #                     grad_outputs=v,
+    #                     only_inputs=True, allow_unused=True, 
+    #                     retain_graph=True
+    #                 )
+    
+
     def step(self, loss_tensor):
         # Compute gradients
         gs = torch.autograd.grad(
@@ -52,31 +75,33 @@ class BlockSketchySGD:
             retain_graph=True
         )
 
-        for g, p in zip(gs, self.model.parameters()):
-            # Form sketch
-            vs = torch.randn(torch.numel(p), self.block_rank)  # HVP vectors
-            vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
+        for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
 
-            sketch = []
-            for i in range(self.block_rank):
-                v = vs[:, i].reshape(*p.shape)
-                hvp = torch.autograd.grad(
-                    g, p, 
-                    grad_outputs=v,
-                    only_inputs=True, allow_unused=True, 
-                    retain_graph=True
-                )
-                sketch.append(hvp[0].reshape(-1,))
+            if self.step_count % self.h_recomp_interval == 0:
+                # Form sketch
+                vs = torch.randn(torch.numel(p), self.block_rank)  # HVP vectors
+                vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
 
-            with torch.no_grad():
+                sketch = []
+                for i in range(self.block_rank):
+                    v = vs[:, i].reshape(*p.shape)
+                    hvp = torch.autograd.grad(
+                        g, p, 
+                        grad_outputs=v,
+                        only_inputs=True, allow_unused=True, 
+                        retain_graph=True
+                    )
+                    sketch.append(hvp[0].detach().reshape(-1,))
                 sketch = torch.stack(sketch).T
-                
-                # Approx eigendecomposition of Hessian via randomized nystrom method
-                V_hat, Lam_hat = self.rand_nys_approx(sketch, vs)
 
-                # Invert using Woodbury formula and get approx Newton step
-                step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
-                p.data.add_(-self.lr * step)
+                # Approx eigendecomposition of Hessian via randomized nystrom method
+                self.hessian_blocks[p_idx] = self.rand_nys_approx(sketch, vs)
+
+            # Invert using Woodbury formula and get approx Newton step
+            step = self.approx_newton_step(*self.hessian_blocks[p_idx], g).reshape(*p.shape)
+            p.data.add_(-self.curr_lr * step)
+    
+        self.step_count += 1
 
 
 # OLD CODE
