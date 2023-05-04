@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from utils import * 
 from data import *
 from models import * 
-from block_sketchy_sgd import * 
+from block_sketchy_sgd_torch import * 
 
 
 BATCH_SIZE = 64
@@ -23,7 +23,7 @@ def main():
     
     model = MLP(28*28, 10)
     criterion = nn.CrossEntropyLoss()
-    optimizer = BlockSketchySGD(model)
+    optimizer = BlockSketchySGD(params=model.parameters())
     
     for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
         batch_x = batch_x.to(device).reshape(batch_x.shape[0], -1)
@@ -35,7 +35,7 @@ def main():
 
         optimizer.zero_grad()
         # loss.backward()
-        optimizer.step(loss, model)
+        optimizer.step(loss)
 
         # if batch_idx == 0:
         #     break
