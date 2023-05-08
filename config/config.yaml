@@ -1,5 +1,6 @@
 defaults:
   - optimizer: adam
+  - filter: identity
   - _self_
   - override hydra/launcher: joblib
 

@@ -16,11 +16,13 @@ from utils import *
 from data import *
 from models import * 
 from block_sketchy_sgd import * 
+from filters import * 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 OPTIMIZERS = {'adam': optim.Adam, 'block_sketchy_sgd': BlockSketchySGD}
+FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 DATASETS = {'mnist': load_mnist}
 
 
@@ -45,14 +47,18 @@ def evaluate(model, val_loader):
     return val_loss, val_accuracy
 
 
-def train(model, train_loader, val_loader, opt_config, num_epochs=2, verbose=False):
+def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs=2, verbose=False):
     criterion = nn.CrossEntropyLoss()
     opt_name = opt_config.name
+    filter_name = filter_config.name
+    
+    param_dims = [p.shape for p in model.parameters()]
+    filterer = FILTERS[filter_name](param_dims, **filter_config.params)
 
     if opt_name != 'block_sketchy_sgd':
         optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_config.params)
     else:
-        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params)
+        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, filterer=filterer)
 
     running_loss = 0.0      # Avg loss over the past 100 samples
 
@@ -128,9 +134,10 @@ def seed(seed=0):
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg):
     # Setup W&B logging
-    experiment_name = f"{cfg.optimizer.name}_{cfg.main.dataset_name}_seed_{cfg.main.seed}_lr_{cfg.optimizer.params.lr}"
+    experiment_name = f"{cfg.optimizer.name}_{cfg.main.dataset_name}_{cfg.filter.name}_filter_seed_{cfg.main.seed}_lr_{cfg.optimizer.params.lr}"
     log_config_dict = {
         "opt_name": cfg.optimizer.name,
+        "filter_name": cfg.filter.name,
         "dataset": cfg.main.dataset_name, 
         "batch_size": cfg.main.batch_size,
         "num_epochs": cfg.main.num_epochs,
@@ -156,6 +163,7 @@ def main(cfg):
     train(model, train_loader, val_loader, 
           num_epochs=cfg.main.num_epochs, 
           opt_config=cfg.optimizer, 
+          filter_config=cfg.filter,
           verbose=True)
 
     final_val_perf = evaluate(model, val_loader)

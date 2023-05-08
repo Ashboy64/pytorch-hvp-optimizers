@@ -1,0 +1,3 @@
+name: 'momentum'
+params:
+  momentum: 0.9

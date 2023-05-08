@@ -6,13 +6,20 @@
 
 import numpy as np
 import torch
+from filters import * 
 
 
 class BlockSketchySGD:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100):
+    def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100,
+                 filterer=None):
         self.lr = lr 
         self.curr_lr = lr
+
+        if filterer is None:
+            self.filterer = IdentityFilter()
+        else:
+            self.filterer = filterer
 
         self.model = model
         self.block_rank = block_rank
@@ -21,7 +28,7 @@ class BlockSketchySGD:
         self.step_count = 0
         self.h_recomp_interval = h_recomp_interval
 
-        self.hessian_blocks   = [None for p in model.parameters()]
+        self.hessian_blocks = [None for p in model.parameters()]
     
 
     def zero_grad(self):
@@ -98,8 +105,11 @@ class BlockSketchySGD:
                 self.hessian_blocks[p_idx] = self.rand_nys_approx(sketch, vs)
 
             # Invert using Woodbury formula and get approx Newton step
-            step = self.approx_newton_step(*self.hessian_blocks[p_idx], g).reshape(*p.shape)
-            p.data.add_(-self.curr_lr * step)
+            V_hat, Lam_hat = self.hessian_blocks[p_idx]
+            step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
+            filtered_step = self.filterer.step(g, step, V_hat, Lam_hat, p_idx)
+
+            p.data.add_(-self.curr_lr * filtered_step)
     
         self.step_count += 1
 
