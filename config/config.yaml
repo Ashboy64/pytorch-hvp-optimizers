@@ -4,10 +4,11 @@ defaults:
   - _self_
   - override hydra/launcher: joblib
 
-# main:
-
 seed: 0
 batch_size: 64
 num_epochs: 2
 dataset: 'mnist'
 model: 'mlp'
+
+wandb:
+  mode: null

@@ -14,7 +14,7 @@ class BlockSketchySGD:
     def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100,
                  filterer=None):
         self.lr = lr 
-        self.curr_lr = lr
+        self.curr_lrs = [lr for p in model.parameters()]
 
         if filterer is None:
             self.filterer = IdentityFilter()
@@ -61,26 +61,38 @@ class BlockSketchySGD:
         return first_term + second_term
     
 
-    # def get_learning_rate(self, p, g, V_hat, Lam_hat, num_iter=5):
-    #     z = torch.randn(torch.numel(p, 1))
-    #     y = z / torch.linalg.norm(z)
+    def get_learning_rate(self, p, g, V_hat, Lam_hat, num_iter=10):
+        z = torch.randn_like(p)
+        y = z / torch.linalg.norm(z)
 
-    #     for i in range(num_iter):
-    #         v = self.approx_newton_step(V_hat, np.sqrt(Lam_hat), y)
-    #         v_prime = torch.autograd.grad(
-    #                     g, p, 
-    #                     grad_outputs=v,
-    #                     only_inputs=True, allow_unused=True, 
-    #                     retain_graph=True
-    #                 )
+        lmbda = None 
+
+        for i in range(num_iter):
+            v = self.approx_newton_step(V_hat, np.sqrt(Lam_hat), y).reshape(*p.shape)
+            v_prime = torch.autograd.grad(
+                        g, p, 
+                        grad_outputs=v,
+                        only_inputs=True, allow_unused=True, 
+                        retain_graph=True
+                    )[0].reshape(-1,)
+            new_y = self.approx_newton_step(V_hat, np.sqrt(Lam_hat), v_prime).reshape(-1, 1)
+            
+            lmbda = y.reshape(1, -1) @ new_y
+            y = (new_y / torch.linalg.norm(new_y)).reshape(*p.shape)
+        
+        return (1 / lmbda).item()
+
     
-
+    @torch.no_grad()
     def step(self, loss_tensor):
         # Compute gradients
         gs = torch.autograd.grad(
             loss_tensor, self.model.parameters(), create_graph=True, 
             retain_graph=True
         )
+
+        avg_lam_hats = []
+        step_mags = []
 
         for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
 
@@ -98,20 +110,29 @@ class BlockSketchySGD:
                         only_inputs=True, allow_unused=True, 
                         retain_graph=True
                     )
-                    sketch.append(hvp[0].detach().reshape(-1,))
+                    sketch.append(hvp[0].reshape(-1,))
                 sketch = torch.stack(sketch).T
 
                 # Approx eigendecomposition of Hessian via randomized nystrom method
                 self.hessian_blocks[p_idx] = self.rand_nys_approx(sketch, vs)
 
+                # Upate learning rate if using automatic schedule 
+                if self.lr == 'auto':
+                    self.curr_lrs[p_idx] = self.get_learning_rate(p, g, *self.hessian_blocks[p_idx], num_iter=10)
+
             # Invert using Woodbury formula and get approx Newton step
             V_hat, Lam_hat = self.hessian_blocks[p_idx]
-            step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
-            filtered_step = self.filterer.step(g, step, V_hat, Lam_hat, p_idx)
+            avg_lam_hats.append( torch.mean(Lam_hat) )
 
-            p.data.add_(-self.curr_lr * filtered_step)
+            step = self.approx_newton_step(V_hat, Lam_hat, g).reshape(*p.shape)
+            filtered_step = self.filterer.step(g, step, V_hat, Lam_hat, p_idx).reshape(*p.shape)
+
+            p.data.add_(-self.curr_lrs[p_idx] * filtered_step)
+            step_mags.append( torch.linalg.norm(-self.curr_lrs[p_idx] * filtered_step) )
     
         self.step_count += 1
+
+        return {'avg_lam_hats': avg_lam_hats, 'avg_step_mags': step_mags, 'avg_lrs': self.curr_lrs}
 
 
 # OLD CODE

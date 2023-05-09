@@ -39,7 +39,7 @@ def evaluate(model, val_loader):
 
     with torch.no_grad():
         for batch_x, batch_y in val_loader:
-            batch_x = batch_x.to(device).reshape(batch_x.shape[0], -1)
+            batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             
             logits = model(batch_x)
@@ -86,7 +86,7 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
             to_log = {}
             to_log['timestep'] = timestep
             
-            batch_x = batch_x.to(device).reshape(batch_x.shape[0], -1)
+            batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             
             logits = model(batch_x)
@@ -95,10 +95,25 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
 
             optimizer.zero_grad()
             if opt_name not in CUSTOM_OPTS:
-                loss.backward()
-                optimizer.step()
+                
+                with torch.no_grad():
+                    step_mags = []
+                    prev_params = [torch.clone(p.data) for p in model.parameters()]
+
+                    loss.backward()
+                    optimizer.step()
+
+                    for idx, p in enumerate(model.parameters()):
+                        step_mags.append( torch.linalg.norm(p.data - prev_params[idx]) )
+                    to_log['avg_step_mags'] = np.mean(step_mags)
+
             else:
-                optimizer.step(loss)
+                step_info = optimizer.step(loss)
+                for k in step_info:
+                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs']:
+                        to_log[k] = np.mean(step_info[k])
+                    else:
+                        to_log[k] = step_info[k]
 
             running_loss += loss.item()
             if (batch_idx + 1) % 100 == 0:
@@ -149,6 +164,7 @@ def main(cfg):
         "dataset": cfg.dataset, 
         "batch_size": cfg.batch_size,
         "num_epochs": cfg.num_epochs,
+        "model": cfg.model,
         "seed": cfg.seed, 
         "full_config": cfg
     }
@@ -160,7 +176,8 @@ def main(cfg):
         project = "ee364b-final-project",
         name    = experiment_name,
         entity  = "ee364b-final-project",
-        config  = log_config_dict
+        config  = log_config_dict, 
+        mode    = cfg.wandb.mode
     )
 
     # Run experiment
