@@ -11,8 +11,8 @@ def load_mnist(batch_size):
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
 
-    train_set = datasets.MNIST('../data/mnist', train=True, download=True, transform=transform)
-    test_set = datasets.MNIST('../data/mnist', train=False, transform=transform)
+    train_set = datasets.MNIST('data/mnist', train=True, download=True, transform=transform)
+    test_set = datasets.MNIST('data/mnist', train=False, transform=transform)
 
     train_set_size = int(len(train_set) * 0.8)
     val_set_size = len(train_set) - train_set_size
@@ -26,12 +26,18 @@ def load_mnist(batch_size):
     val_loader = DataLoader(val_set, batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    return train_loader, val_loader, test_loader
+    info = {'input_dim': (1, 28, 28)}
+
+    return train_loader, val_loader, test_loader, info
 
 
 def load_cifar10(batch_size):
-    train_set = datasets.CIFAR10(root='../data/cifar10', download=True, transform=transforms.ToTensor())
-    test_set = datasets.CIFAR10(root='../data/cifar10', train=False, transform=transforms.ToTensor())
+    transform = transforms.Compose(
+               [transforms.ToTensor(),
+               transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+
+    train_set = datasets.CIFAR10(root='data/cifar10', download=True, transform=transform)
+    test_set = datasets.CIFAR10(root='data/cifar10', train=False, transform=transform)
     
     train_set_size = int(len(train_set) * 0.8)
     val_set_size = len(train_set) - train_set_size
@@ -45,5 +51,7 @@ def load_cifar10(batch_size):
     train_loader = DataLoader(train_set, batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
+
+    info = {'input_dim': (3, 32, 32)}
     
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, info

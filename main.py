@@ -16,14 +16,19 @@ from utils import *
 from data import *
 from models import * 
 from block_sketchy_sgd import * 
+from agd import * 
 from filters import * 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-OPTIMIZERS = {'adam': optim.Adam, 'block_sketchy_sgd': BlockSketchySGD}
+DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10}
+MODELS = {'mlp': MLP, 'cnn': ConvNet}
+
+OPTIMIZERS = {'adam': optim.Adam, 'adamw': optim.AdamW, 'agd': AGD, 'block_sketchy_sgd': BlockSketchySGD}
+CUSTOM_OPTS = ['agd', 'block_sketchy_sgd']
+
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
-DATASETS = {'mnist': load_mnist}
 
 
 def evaluate(model, val_loader):
@@ -55,7 +60,7 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
     param_dims = [p.shape for p in model.parameters()]
     filterer = FILTERS[filter_name](param_dims, **filter_config.params)
 
-    if opt_name != 'block_sketchy_sgd':
+    if opt_name not in CUSTOM_OPTS:
         optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_config.params)
     else:
         optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, filterer=filterer)
@@ -89,7 +94,7 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
             to_log['loss'] = loss
 
             optimizer.zero_grad()
-            if opt_name != 'block_sketchy_sgd':
+            if opt_name not in CUSTOM_OPTS:
                 loss.backward()
                 optimizer.step()
             else:
@@ -134,17 +139,22 @@ def seed(seed=0):
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg):
     # Setup W&B logging
-    experiment_name = f"{cfg.optimizer.name}_{cfg.main.dataset_name}_{cfg.filter.name}_filter_seed_{cfg.main.seed}_lr_{cfg.optimizer.params.lr}"
+    experiment_name = f"{cfg.optimizer.name}_{cfg.dataset}_{cfg.filter.name}_filter_seed_{cfg.seed}"
+    if 'lr' in cfg.optimizer.params:
+        experiment_name += f'_lr_{cfg.optimizer.params.lr}'
+    
     log_config_dict = {
         "opt_name": cfg.optimizer.name,
         "filter_name": cfg.filter.name,
-        "dataset": cfg.main.dataset_name, 
-        "batch_size": cfg.main.batch_size,
-        "num_epochs": cfg.main.num_epochs,
-        "seed": cfg.main.seed, 
-        "lr": cfg.optimizer.params.lr,
+        "dataset": cfg.dataset, 
+        "batch_size": cfg.batch_size,
+        "num_epochs": cfg.num_epochs,
+        "seed": cfg.seed, 
         "full_config": cfg
     }
+
+    if "lr" in cfg.optimizer.params:
+        log_config_dict["lr"] = cfg.optimizer.params.lr,
 
     wandb.init(
         project = "ee364b-final-project",
@@ -154,14 +164,19 @@ def main(cfg):
     )
 
     # Run experiment
-    seed(cfg.main.seed)
+    seed(cfg.seed)
     
-    train_loader, val_loader, test_loader = DATASETS[cfg.main.dataset_name](cfg.main.batch_size)
-    model = MLP(28*28, 10).to(device)
+    train_loader, val_loader, test_loader, info = DATASETS[cfg.dataset](cfg.batch_size)
+
+    print(f"train set size: {len(train_loader)}")
+    print(f"val set size: {len(val_loader)}")
+    print(f"test set size: {len(test_loader)}")
+
+    model = MODELS[cfg.model](info['input_dim'], 10).to(device)
     
     total_start_time = time()
     train(model, train_loader, val_loader, 
-          num_epochs=cfg.main.num_epochs, 
+          num_epochs=cfg.num_epochs, 
           opt_config=cfg.optimizer, 
           filter_config=cfg.filter,
           verbose=True)
