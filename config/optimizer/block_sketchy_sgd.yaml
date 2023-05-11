@@ -4,3 +4,4 @@ params:
   block_rank: 5
   rho: 0.001  # Levenberg-Marquardt regularization
   h_recomp_interval: 100
+  num_auto_lr_iter: 10

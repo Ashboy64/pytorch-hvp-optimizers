@@ -12,9 +12,10 @@ from filters import *
 class BlockSketchySGD:
     
     def __init__(self, model, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100,
-                 filterer=None):
+                 num_auto_lr_iter=10, filterer=None):
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
+        self.num_auto_lr_iter = num_auto_lr_iter
 
         if filterer is None:
             self.filterer = IdentityFilter()
@@ -67,7 +68,7 @@ class BlockSketchySGD:
 
         lmbda = None 
 
-        for i in range(num_iter):
+        for i in range(self.num_auto_lr_iter):
             v = self.approx_newton_step(V_hat, np.sqrt(Lam_hat), y).reshape(*p.shape)
             v_prime = torch.autograd.grad(
                         g, p, 

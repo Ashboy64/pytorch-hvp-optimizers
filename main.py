@@ -25,7 +25,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10}
 MODELS = {'mlp': MLP, 'cnn': ConvNet}
 
-OPTIMIZERS = {'adam': optim.Adam, 'adamw': optim.AdamW, 'agd': AGD, 'block_sketchy_sgd': BlockSketchySGD}
+OPTIMIZERS = {'sgd': optim.SGD,
+              'adam': optim.Adam, 
+              'adamw': optim.AdamW, 
+              'agd': AGD, 
+              'block_sketchy_sgd': BlockSketchySGD}
 CUSTOM_OPTS = ['agd', 'block_sketchy_sgd']
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
