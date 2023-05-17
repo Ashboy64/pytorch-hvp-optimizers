@@ -19,9 +19,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def main():    
-    train_loader, val_loader, test_loader = load_mnist(BATCH_SIZE)
+    train_loader, val_loader, test_loader, info = load_mnist(BATCH_SIZE)
     
-    model = MLP(28*28, 10)
+    model = MLP(info['input_dim'], 10)
     criterion = nn.CrossEntropyLoss()
     optimizer = BlockSketchySGD(params=model.parameters())
     

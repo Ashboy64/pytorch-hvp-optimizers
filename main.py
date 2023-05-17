@@ -15,8 +15,11 @@ import torch.nn.functional as F
 from utils import * 
 from data import *
 from models import * 
+
 from block_sketchy_sgd import * 
+from sketchy_system_sgd import * 
 from agd import * 
+
 from filters import * 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,8 +32,10 @@ OPTIMIZERS = {'sgd': optim.SGD,
               'adam': optim.Adam, 
               'adamw': optim.AdamW, 
               'agd': AGD, 
-              'block_sketchy_sgd': BlockSketchySGD}
-CUSTOM_OPTS = ['agd', 'block_sketchy_sgd']
+              'block_sketchy_sgd': BlockSketchySGD, 
+              'sketchy_system_sgd': SketchySystemSGD}
+
+CUSTOM_OPTS = ['agd', 'block_sketchy_sgd', 'sketchy_system_sgd']
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 
@@ -114,7 +119,7 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
             else:
                 step_info = optimizer.step(loss)
                 for k in step_info:
-                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs']:
+                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs', 'avg_step_deviations']:
                         to_log[k] = np.mean(step_info[k])
                     else:
                         to_log[k] = step_info[k]

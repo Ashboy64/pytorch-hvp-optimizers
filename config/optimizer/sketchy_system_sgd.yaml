@@ -1,0 +1,5 @@
+name: 'sketchy_system_sgd'
+params:
+  lr: 0.0003
+  block_rank: 5
+  cache_interval: 100
