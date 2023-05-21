@@ -66,34 +66,53 @@ class SketchySystemSGD:
                     sketch.append(hvp[0].reshape(-1,))
                 sketch_T = torch.stack(sketch)
 
-                L, _ = torch.linalg.cholesky_ex(sketch_T @ sketch_T.T)
-                cache = (vs, sketch_T.T, L)  # (test matrix, sketch, L)
+                mat = sketch_T @ sketch_T.T 
+                mat_rmsn = torch.sum(mat ** 2 / torch.numel(mat))**0.5
+
+                if mat_rmsn > 1e-3:
+                    mat_Q, mat_R = torch.linalg.qr(sketch_T.T)
+                else:
+                    mat_Q, mat_R = None, None
+
+                cache = (vs, sketch_T.T, mat_R)  # (test matrix, sketch, L)
                 self.cache[p_idx] = cache
 
-            vs, sketch, L = self.cache[p_idx]
+            vs, sketch, mat_R = self.cache[p_idx]
 
             A = sketch.T
             g = g.reshape(-1, )
             b = vs.T @ g
 
-            # GRAD PROJECTION STEP
-            q = g - A.T @ torch.linalg.solve(A @ A.T, A @ g - b)
-            step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
+            # PERTURBATION STEP (take q = g + (grad of constraint violation)
+            # q = g + 0.1 * A.T @ (A @ g - b)
+            # step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
+            # q = q.reshape(*p.shape)
 
+
+            # GRAD PROJECTION STEP (currently this is working the best)
+            if mat_R is not None:
+                q = torch.linalg.solve_triangular(mat_R.T, (A @ g - b).reshape(-1,1), upper=False)
+                q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
+                q = g - A.T @ q
+                
+                step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
+            else:
+                q = g
+                step_deviations.append( 0. )
             q = q.reshape(*p.shape)
             
 
             # MIN NORM GRADIENT STEP
-            # q = torch.linalg.solve(A @ A.T, b)
+            # if mat_R is not None:
+            #     q = torch.linalg.solve_triangular(mat_R.T, b.reshape(-1,1), upper=False)
+            #     q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
+            #     q = A.T @ q
 
-            # # q = torch.linalg.solve_triangular(L.T, b.reshape(-1,1), upper=True)
-            # # q = torch.linalg.solve_triangular(L, q, upper=False)
-
-            # # q = torch.triangular_solve(b.reshape(-1,1), L.T, upper=True).solution
-            # # q = torch.triangular_solve(q, L, upper=False).solution
-            
-            # q = (A.T @ q).reshape(*p.shape)
-
+            #     step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
+            # else:
+            #     q = g
+            #     step_deviations.append( 0. )
+            # q = q.reshape(*p.shape)
             
 
             q = self.filterer.step(g, q, None, None, p_idx).reshape(*p.shape)
