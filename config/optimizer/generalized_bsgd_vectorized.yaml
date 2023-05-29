@@ -1,0 +1,6 @@
+name: 'generalized_bsgd_vectorized'
+params:
+  lr: 0.0003
+  block_rank: 100
+  block_size: 10
+  h_recomp_interval: 100
