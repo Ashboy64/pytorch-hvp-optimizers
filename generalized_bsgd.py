@@ -11,7 +11,7 @@ from filters import *
 
 class GeneralizedBSGD:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, h_recomp_interval=100,
+    def __init__(self, model, lr=3e-4, block_rank=3, block_size=3, h_recomp_interval=100,
                  filterer=None):
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
@@ -23,68 +23,25 @@ class GeneralizedBSGD:
 
         self.model = model
         self.block_rank = block_rank
+        self.block_size = block_size
+
+        print(block_rank)
+        print(block_size)
 
         self.step_count = 0
         self.h_recomp_interval = h_recomp_interval
 
-        self.cache = [None for p in model.parameters()]
-    
+        self.sketches = [None for p in model.parameters()]
+        self.cache = [[None for i in range(torch.numel(p) // self.block_size)] \
+            for p in model.parameters()]
+
 
     def zero_grad(self):
         for p in self.model.parameters():
             if p.grad is not None:
                 p.grad.data.zero_()
     
-    @torch.no_grad()
-    def rand_nys_approx(self, Y, Q):    # Y is sketch, Q is test matrix (vecs of HVP)
-        p = Y.shape[0] 
-        # eps = np.spacing(np.linalg.norm(Y))
-        eps = 1e-10
-        nu = (p**0.5) * eps
-        
-        Y_nu = Y + nu*Q 
 
-        mid = Q.T @ Y_nu 
-        nys_approx = Y_nu @ torch.linalg.solve(mid, Y_nu.T)
-        # U, Sigma, V_T = torch.linalg.svd(mid, full_matrices=False)
-        # mid_inv = V_T.T @ ((1. / Sigma) * U)
-        
-        # nys_approx = Y_nu @ mid_inv @ Y_nu.T
-        nys_approx_norm = torch.linalg.norm(nys_approx)
-
-        # U, Sigma, V_T = torch.linalg.svd(nys_approx, full_matrices=False)
-        # nys_pinv = V_T.T @ ((1. / Sigma) * U)
-
-        # print("Computed nys_pinv")
-        
-        # return nys_pinv, nys_approx_norm
-
-        Q, R = torch.linalg.qr(nys_approx, mode='reduced')
-        Q = Q[:, :self.block_rank]
-        R = R[:self.block_rank, :]
-        
-        
-        # P, L, U = torch.linalg.lu(nys_approx)
-        # print("Finished PLU")
-
-        return Q, R, nys_approx_norm
-    
-    def approx_newton_step(self, P, L, U, g):
-        print("In newton step")
-        g = g.reshape(-1, 1)
-        q = P.T @ g 
-        print(q)
-
-        q = torch.linalg.solve_triangular(L, q, upper=False)
-        print(q)
-
-        print(U)
-
-        q = torch.linalg.solve_triangular(U, q, upper=True)
-        print(q)
-
-        return q     
-    
     @torch.no_grad()
     def step(self, loss_tensor):
         # Compute gradients
@@ -97,14 +54,17 @@ class GeneralizedBSGD:
         step_mags = []
 
         for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
-
+            p_size = torch.numel(p)
+            p_step = torch.zeros(p_size)
+            num_hvps = min(self.block_rank, p_size)
+            
             if self.step_count % self.h_recomp_interval == 0:
                 # Form sketch
                 vs = torch.randn(torch.numel(p), self.block_rank)  # HVP vectors
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
 
                 sketch = []
-                for i in range(self.block_rank):
+                for i in range(num_hvps):
                     v = vs[:, i].reshape(*p.shape)
                     hvp = torch.autograd.grad(
                         g, p, 
@@ -114,30 +74,39 @@ class GeneralizedBSGD:
                     )
                     sketch.append(hvp[0].reshape(-1,))
                 sketch = torch.stack(sketch).T
-
-                # Approx LU decomposition of Hessian via randomized nystrom method
-                self.cache[p_idx] = self.rand_nys_approx(sketch, vs)
-
-            # Invert using Woodbury formula and get approx Newton step
-            Q, R, nys_approx_norm = self.cache[p_idx]
-            # nys_pinv, nys_approx_norm = self.cache[p_idx]
-            # print(f"nys approx norm: {nys_approx_norm}")
-
-            # step = self.approx_newton_step(P, L, U, g).reshape(*p.shape)
-
-            # print(f"step mag before norm: { torch.linalg.norm(step) }")
-            # step /= torch.linalg.norm(step)
-            # print(f"step mag after norm: { torch.linalg.norm(step) }")
-
-            step = Q.T @ g.reshape(-1,)
-            step = R.T @ torch.linalg.solve(R @ R.T, step)
-            # step /= torch.linalg.norm(step)
+                
+                mid = torch.linalg.pinv(vs.T @ sketch, atol=1e-6)
+                self.sketches[p_idx] = (mid, sketch)
             
-            filtered_step = self.filterer.step(g, step, None, None, p_idx).reshape(*p.shape)
+            g = g.reshape(-1,)
 
-            p.data.add_(-self.curr_lrs[p_idx] * filtered_step)
-            step_mags.append( torch.linalg.norm(-self.curr_lrs[p_idx] * filtered_step) )
-    
+            for block_idx in range(p_size // self.block_size):
+                # Extract this block's corresponding portion of sketch
+                block_start_idx = block_idx * self.block_size
+                block_end_idx = min((block_idx + 1) * self.block_size, p_size)
+
+                # Recompute subsketch pseudoinverse if needed
+                if self.step_count % self.h_recomp_interval == 0:
+                    mid, sketch = self.sketches[p_idx]
+                    subsketch = sketch[block_start_idx : block_end_idx, : ]
+                    block_hess_approx = subsketch @ mid @ subsketch.T 
+                    inv_block_hess = torch.linalg.pinv(block_hess_approx, atol=1e-6)
+                    self.cache[p_idx][block_idx] = inv_block_hess
+                
+                # Form approx Newton step for this block
+                block_step = -self.cache[p_idx][block_idx] @ g[block_start_idx : block_end_idx]
+                
+                block_step_norm = torch.linalg.norm(block_step)
+                if block_step_norm > 1.:
+                    block_step /= block_step_norm
+
+                p_step[block_start_idx : block_end_idx] = block_step
+
+            p_step = p_step.reshape(*p.shape)
+            filtered_step = self.filterer.step(g, p_step, None, None, p_idx).reshape(*p.shape)
+            p.data.add_(self.curr_lrs[p_idx] * filtered_step)
+            step_mags.append( torch.linalg.norm(self.curr_lrs[p_idx] * filtered_step) )
+            
         self.step_count += 1
 
         return {'avg_lrs': self.curr_lrs}
