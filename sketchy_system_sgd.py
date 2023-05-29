@@ -28,6 +28,9 @@ class SketchySystemSGD:
         self.cache_interval = cache_interval
 
         self.cache = [None for p in model.parameters()]
+
+        self.q_hats = [None for p in model.parameters()] 
+        self.sim_vars = [None for p in model.parameters()]
     
 
     def zero_grad(self):
@@ -46,16 +49,19 @@ class SketchySystemSGD:
 
         step_mags = []
         step_deviations = []
+        step_grad_sims = []
 
         for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
 
             if self.step_count % self.cache_interval == 0:
+                curr_block_rank = min(torch.numel(p), self.block_rank)
+
                 # Form sketch
-                vs = torch.randn(torch.numel(p), self.block_rank)  # HVP vectors
+                vs = torch.randn(torch.numel(p), curr_block_rank)  # HVP vectors
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
 
                 sketch = []
-                for i in range(self.block_rank):
+                for i in range( curr_block_rank ):
                     v = vs[:, i].reshape(*p.shape)
                     hvp = torch.autograd.grad(
                         g, p, 
@@ -66,13 +72,17 @@ class SketchySystemSGD:
                     sketch.append(hvp[0].reshape(-1,))
                 sketch_T = torch.stack(sketch)
 
-                mat = sketch_T @ sketch_T.T 
-                mat_rmsn = torch.sum(mat ** 2 / torch.numel(mat))**0.5
+                mat = sketch_T @ sketch_T.T
+                # mat_rmsn = torch.sum(mat ** 2 / torch.numel(mat))**0.5
 
-                if mat_rmsn > 1e-3:
-                    mat_Q, mat_R = torch.linalg.qr(sketch_T.T)
-                else:
-                    mat_Q, mat_R = None, None
+                # eigvals = torch.linalg.eigvalsh(mat)
+                # print(f"Eigvals = {eigvals}")
+                # print(f"Mat rmsn = {mat_rmsn}")
+
+                # if mat_rmsn > 1e-3:
+                mat_Q, mat_R = torch.linalg.qr(sketch_T.T)
+                # else:
+                    # mat_Q, mat_R = None, None
 
                 cache = (vs, sketch_T.T, mat_R)  # (test matrix, sketch, L)
                 self.cache[p_idx] = cache
@@ -83,8 +93,13 @@ class SketchySystemSGD:
             g = g.reshape(-1, )
             b = vs.T @ g
 
+            # print(f"HESSIAN CONSTRAINT VIOLATION: { torch.linalg.norm(A @ g - b) }")
+
             # PERTURBATION STEP (take q = g + (grad of constraint violation)
-            # q = g + 0.1 * A.T @ (A @ g - b)
+            # step_mod = A.T @ (A @ g - b)
+            # step_mod /= torch.linalg.norm(step_mod)
+
+            # q = g + step_mod
             # step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
             # q = q.reshape(*p.shape)
 
@@ -99,6 +114,39 @@ class SketchySystemSGD:
             else:
                 q = g
                 step_deviations.append( 0. )
+            
+            # Constrain norm to prevent blowup
+            q_norm = torch.linalg.norm(q)
+            if q_norm > 1.:
+                q /= q_norm
+            
+            # Interpolate between gradient and computed update
+            # q = (q + g) / 2.
+            
+            # # Low pass filter on computed updates
+            # if self.q_hats[p_idx] is None:
+            #     self.q_hats[p_idx] = q 
+            # else:
+            #     self.q_hats[p_idx] = 0.9*self.q_hats[p_idx] + 0.1*q 
+            
+            # # Auto lr tuning experiments
+            # # Keep track of how closely update directions match to modulate learning rate
+            # sim = (torch.dot(self.q_hats[p_idx], q)) / ( torch.linalg.norm(self.q_hats[p_idx]) * torch.linalg.norm(q) )
+            # # sim = torch.dot(self.q_hats[p_idx], q)
+            # if self.sim_vars[p_idx] is None:
+            #     self.sim_vars[p_idx] = sim 
+            # else:
+            #     self.sim_vars[p_idx] = 0.9*self.sim_vars[p_idx] + 0.1*sim 
+            # if self.step_count > 100:
+            #     self.curr_lrs[p_idx] = self.lr * self.sim_vars[p_idx]
+            
+            # # Interpolate between gradient and computed update based on update agreement
+            # q = sim*self.q_hats[p_idx] + (1 - sim)*g
+            
+            # q = self.q_hats[p_idx]
+
+            # step_grad_sims.append( torch.dot(q, g) / ( torch.linalg.norm(g) * torch.linalg.norm(q) ) )
+
             q = q.reshape(*p.shape)
             
 
@@ -112,6 +160,10 @@ class SketchySystemSGD:
             # else:
             #     q = g
             #     step_deviations.append( 0. )
+            
+            # q_norm = torch.linalg.norm(q)
+            # if q_norm > 1.:
+            #     q /= q_norm
             # q = q.reshape(*p.shape)
             
 
@@ -121,4 +173,4 @@ class SketchySystemSGD:
             step_mags.append( torch.linalg.norm(-self.curr_lrs[p_idx] * q) )
         
         self.step_count += 1
-        return {'avg_step_mags': step_mags, 'avg_lrs': self.curr_lrs, 'avg_step_deviations': step_deviations}
+        return {'avg_step_mags': step_mags, 'avg_lrs': self.curr_lrs, 'avg_step_deviations': step_deviations, 'avg_grad_sims': step_grad_sims}

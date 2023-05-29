@@ -1,0 +1,5 @@
+name: 'generalized_bsgd'
+params:
+  lr: 0.0003
+  block_rank: 5
+  h_recomp_interval: 100

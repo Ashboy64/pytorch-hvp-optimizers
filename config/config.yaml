@@ -12,3 +12,5 @@ model: 'mlp'
 
 wandb:
   mode: null
+  project: 'ee364b-final-project'
+  experiment_name_prefix: ''

@@ -17,6 +17,7 @@ from data import *
 from models import * 
 
 from block_sketchy_sgd import * 
+from generalized_bsgd import * 
 from sketchy_system_sgd import * 
 from agd import * 
 
@@ -33,27 +34,27 @@ OPTIMIZERS = {'sgd': optim.SGD,
               'adamw': optim.AdamW, 
               'agd': AGD, 
               'block_sketchy_sgd': BlockSketchySGD, 
+              'generalized_bsgd': GeneralizedBSGD,
               'sketchy_system_sgd': SketchySystemSGD}
 
-CUSTOM_OPTS = ['agd', 'block_sketchy_sgd', 'sketchy_system_sgd']
+CUSTOM_OPTS = ['agd', 'block_sketchy_sgd', 'generalized_bsgd', 'sketchy_system_sgd']
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 
-
+@torch.no_grad()
 def evaluate(model, val_loader):
     criterion = nn.CrossEntropyLoss()
     val_loss = 0
     num_correct = 0
     num_total = len(val_loader.dataset)
 
-    with torch.no_grad():
-        for batch_x, batch_y in val_loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
-            
-            logits = model(batch_x)
-            val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
-            num_correct += (logits.argmax(1) == batch_y).sum().item()
+    for batch_x, batch_y in val_loader:
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        
+        logits = model(batch_x)
+        val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
+        num_correct += (logits.argmax(1) == batch_y).sum().item()
 
     val_loss /= len(val_loader) * batch_x.shape[0]
     val_accuracy = num_correct / num_total 
@@ -74,84 +75,65 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
     else:
         optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, filterer=filterer)
 
-    running_loss = 0.0      # Avg loss over the past 100 samples
-
-    out_timesteps = []
-    out_train_loss = []
-    out_val_loss = []
-    out_val_acc = []
+    running_loss = 0.0
+    avg_val_acc_over_epoch = 0.
 
     timestep = 0
-    start_timestamp = time()
-    
-    # We periodically evaluate on validation data. We don't want the time taken to 
-    # do so to factor into the logged wall clock time. So we accumulate the time 
-    # taken in the val evaluations in time_to_subtract and subtract this out before 
-    # logging.
-    time_to_subtract = 0.0
     
     for epoch_idx in range(num_epochs):
         for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
-            to_log = {}
-            to_log['timestep'] = timestep
-            
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             
             logits = model(batch_x)
-            loss = criterion(logits, batch_y)
-            to_log['loss'] = loss
+            train_loss = criterion(logits, batch_y)
 
             optimizer.zero_grad()
             if opt_name not in CUSTOM_OPTS:
-                
-                with torch.no_grad():
-                    step_mags = []
-                    prev_params = [torch.clone(p.data) for p in model.parameters()]
-
-                    loss.backward()
-                    optimizer.step()
-
-                    for idx, p in enumerate(model.parameters()):
-                        step_mags.append( torch.linalg.norm(p.data - prev_params[idx]) )
-                    to_log['avg_step_mags'] = np.mean(step_mags)
-
+                train_loss.backward()
+                optimizer.step()
+                step_info = {} 
             else:
-                step_info = optimizer.step(loss)
+                step_info = optimizer.step(train_loss)
+
+            running_loss += train_loss.item()
+
+            to_log = {}
+            if batch_idx == len(train_loader)-1:
+                val_loss, val_acc = evaluate(model, val_loader)
+                avg_val_acc_over_epoch = (epoch_idx*avg_val_acc_over_epoch + val_acc) / (epoch_idx + 1)
+                
+                to_log['timestep'] = timestep
+                to_log['val_acc_over_epoch'] = val_acc 
+                to_log['avg_val_acc_over_epoch'] = avg_val_acc_over_epoch
+
+            if batch_idx % 100 == 0:
+                if len(to_log) == 0:
+                    val_loss, val_acc = evaluate(model, val_loader)
+                    to_log['timestep'] = timestep
+                    to_log['val_loss'] = val_loss
+                    to_log['val_acc'] = val_acc
+
+                to_log['loss'] = train_loss
+
                 for k in step_info:
-                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs', 'avg_step_deviations']:
+                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs', 'avg_step_deviations', 'avg_grad_sims']:
                         to_log[k] = np.mean(step_info[k])
                     else:
                         to_log[k] = step_info[k]
-
-            running_loss += loss.item()
-            if (batch_idx + 1) % 100 == 0:
-                val_start_time = time()
-
-                val_loss, val_acc = evaluate(model, val_loader)
-                to_log['val_loss'] = val_loss
-                to_log['val_acc'] = val_acc
 
                 if verbose:
                     out_str = f'Epoch {epoch_idx} Batch num {batch_idx}: '
                     out_str = out_str + f'train_loss={running_loss / 100:.3f}, val_loss={val_loss:.3f}, '
                     out_str = out_str + f'val_acc={val_acc:.3f}'
                     print(out_str)
-
-                out_timesteps.append(timestep)
-                out_train_loss.append(running_loss / 100)
-                out_val_loss.append(val_loss)
-                out_val_acc.append(val_acc)
-
+                
                 running_loss = 0.0
 
-                time_to_subtract += time() - val_start_time
-
-            to_log['wall_clock_time'] = time() - start_timestamp - time_to_subtract
-            wandb.log(to_log)
+            if len(to_log) > 0:
+                wandb.log(to_log)
+            
             timestep += 1
-
-    return out_timesteps, out_train_loss, out_val_loss, out_val_acc
 
 
 def seed(seed=0):
@@ -163,7 +145,7 @@ def seed(seed=0):
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg):
     # Setup W&B logging
-    experiment_name = f"{cfg.optimizer.name}_{cfg.dataset}_{cfg.filter.name}_filter_seed_{cfg.seed}"
+    experiment_name = f"{cfg.wandb.experiment_name_prefix}_{cfg.optimizer.name}_{cfg.dataset}_{cfg.filter.name}_filter_seed_{cfg.seed}"
     if 'lr' in cfg.optimizer.params:
         experiment_name += f'_lr_{cfg.optimizer.params.lr}'
     
@@ -182,7 +164,7 @@ def main(cfg):
         log_config_dict["lr"] = cfg.optimizer.params.lr,
 
     wandb.init(
-        project = "ee364b-final-project",
+        project = cfg.wandb.project,
         name    = experiment_name,
         entity  = "ee364b-final-project",
         config  = log_config_dict, 
