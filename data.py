@@ -1,8 +1,11 @@
 import torch
+import skorch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision import transforms
+from sklearn.datasets import fetch_rcv1
+from sklearn.model_selection import train_test_split
 
 
 def load_mnist(batch_size):
@@ -55,3 +58,17 @@ def load_cifar10(batch_size):
     info = {'input_dim': (3, 32, 32)}
     
     return train_loader, val_loader, test_loader, info
+
+
+def load_rcv1(batch_size):
+    X, y = fetch_rcv1(data_home='data/rcv1', download_if_missing=True, return_X_y=True)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+    
+    train_set = skorch.dataset.Dataset(X_train, y_train)
+    test_set = skorch.dataset.Dataset(X_test, y_test)
+    
+    train_loader = DataLoader(train_set, shuffle=True)
+    test_loader = DataLoader(test_set, batch_size, shuffle=False)
+    
+    return train_loader, test_loader
+    
