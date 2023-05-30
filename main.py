@@ -70,12 +70,12 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
     filter_name = filter_config.name
     
     param_dims = [p.shape for p in model.parameters()]
-    filterer = FILTERS[filter_name](param_dims, **filter_config.params)
+    filterer = FILTERS[filter_name](param_dims, **filter_config.params, device=device)
 
     if opt_name not in CUSTOM_OPTS:
         optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_config.params)
     else:
-        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, filterer=filterer)
+        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, device=device, filterer=filterer)
 
     running_loss = 0.0
     avg_val_acc_over_epoch = 0.

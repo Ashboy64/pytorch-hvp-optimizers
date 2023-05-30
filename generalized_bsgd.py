@@ -11,7 +11,7 @@ from filters import *
 
 class GeneralizedBSGD:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, block_size=3, h_recomp_interval=100,
+    def __init__(self, model, device, lr=3e-4, block_rank=3, block_size=3, h_recomp_interval=100,
                  filterer=None):
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
@@ -22,11 +22,9 @@ class GeneralizedBSGD:
             self.filterer = filterer
 
         self.model = model
+        self.device = device
         self.block_rank = block_rank
         self.block_size = block_size
-
-        print(block_rank)
-        print(block_size)
 
         self.step_count = 0
         self.h_recomp_interval = h_recomp_interval
@@ -60,7 +58,7 @@ class GeneralizedBSGD:
             
             if self.step_count % self.h_recomp_interval == 0:
                 # Form sketch
-                vs = torch.randn(torch.numel(p), self.block_rank)  # HVP vectors
+                vs = torch.randn(torch.numel(p), self.block_rank).to(self.device)  # HVP vectors
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
 
                 sketch = []

@@ -7,12 +7,13 @@
 import math
 import numpy as np
 import torch
+from functorch import vmap
 from filters import * 
 
 
 class GeneralizedBSGDVectorized:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, block_size=3, h_recomp_interval=100,
+    def __init__(self, model, device, lr=3e-4, block_rank=3, block_size=3, h_recomp_interval=100,
                  filterer=None):
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
@@ -23,6 +24,7 @@ class GeneralizedBSGDVectorized:
             self.filterer = filterer
 
         self.model = model
+        self.device = device
         self.block_rank = block_rank
         self.block_size = block_size
 
@@ -47,11 +49,11 @@ class GeneralizedBSGDVectorized:
                     block_info.append( list(range(block_start, block_end)) )
                 else:
                     uneven_block_info = list(range(block_start, p_size))
-                    uneven_block_info = torch.as_tensor(uneven_block_info, dtype=torch.long)
+                    uneven_block_info = torch.as_tensor(uneven_block_info, dtype=torch.long, device=device)
                     # (index info, inv hessian block)
                     self.p_idx_to_uneven_block[p_idx] = (uneven_block_info, None)
             
-            block_info = torch.as_tensor(block_info, dtype=torch.long)
+            block_info = torch.as_tensor(block_info, dtype=torch.long, device=device)
             self.p_idx_to_block_info[p_idx] = block_info
         
         self.inv_block_hessians = [None for p in model.parameters()]
@@ -71,7 +73,7 @@ class GeneralizedBSGDVectorized:
     
     def compute_newton_step(self, block_idx_info, inv_block_hess, g_flat):
         if len(block_idx_info.shape) == 0:
-            return torch.Tensor()
+            return torch.Tensor().to(self.device)
         block_step = -inv_block_hess @ torch.take_along_dim(g_flat, block_idx_info, dim=0)
         block_step /= torch.clip(torch.linalg.norm(block_step), min=1.)
         return block_step
@@ -105,15 +107,15 @@ class GeneralizedBSGDVectorized:
                             retain_graph=True
                     )[0].reshape(-1,)
                 
-                vs = torch.randn(torch.numel(p), num_hvps)  # HVP vectors
+                vs = torch.randn(torch.numel(p), num_hvps).to(self.device)  # HVP vectors
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
-                sketch_T = torch.vmap(get_hvp)(vs.T.reshape(num_hvps, *p.shape))
+                sketch_T = vmap(get_hvp)(vs.T.reshape(num_hvps, *p.shape))
 
                 mid = torch.linalg.pinv(sketch_T @ vs, atol=1e-6)
             
                 # Recompute pseudoinverse of block if needed
                 inv_block_hess_fn = lambda x: self.compute_inv_block_hess(x, mid=mid, sketch=sketch_T.T)
-                self.inv_block_hessians[p_idx] = torch.vmap(inv_block_hess_fn)(self.p_idx_to_block_info[p_idx])
+                self.inv_block_hessians[p_idx] = vmap(inv_block_hess_fn)(self.p_idx_to_block_info[p_idx])
                 if p_idx in self.p_idx_to_uneven_block:
                     uneven_idx_info, _ = self.p_idx_to_uneven_block[p_idx]
                     uneven_inv_block_hess = self.compute_inv_block_hess(uneven_idx_info, mid=mid, sketch=sketch_T.T)
@@ -121,7 +123,7 @@ class GeneralizedBSGDVectorized:
 
             # Form approx Newton steps
             newton_step_fn = lambda idx_info, inv_block_hess : self.compute_newton_step(idx_info, inv_block_hess, g_flat=g_flat)
-            p_step = torch.vmap(newton_step_fn)(self.p_idx_to_block_info[p_idx], self.inv_block_hessians[p_idx]).reshape(-1,)
+            p_step = vmap(newton_step_fn)(self.p_idx_to_block_info[p_idx], self.inv_block_hessians[p_idx]).reshape(-1,)
 
             if p_idx in self.p_idx_to_uneven_block:
                 block_step = self.compute_newton_step(*self.p_idx_to_uneven_block[p_idx], g_flat=g_flat)

@@ -4,7 +4,7 @@ import torch
 
 class IdentityFilter:
 
-    def __init__(self, param_dims):
+    def __init__(self, param_dims, device):
         return 
     
     def step(self, grad, step, V_hat, Lam_hat, p_idx):
@@ -13,9 +13,9 @@ class IdentityFilter:
 
 class MomentumFilter:
 
-    def __init__(self, param_dims, momentum):
+    def __init__(self, param_dims, momentum, device):
         self.momentum = momentum
-        self.traces = [torch.zeros(*d) for d in param_dims]
+        self.traces = [torch.zeros(*d).to(device) for d in param_dims]
     
     def step(self, grad, step, V_hat, Lam_hat, p_idx):
         self.traces[p_idx] = (1 - self.momentum) * step + \
