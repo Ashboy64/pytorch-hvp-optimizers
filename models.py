@@ -7,8 +7,7 @@ import torch.nn.functional as F
 
 
 class MLP(nn.Module):
-    # def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
-    def __init__(self, input_dim, num_classes, hidden_sizes=[]):
+    def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
         super().__init__()
         self.input_dim = input_dim
         num_inputs = 1 
@@ -29,29 +28,6 @@ class MLP(nn.Module):
     def forward(self, x):
         x = x.reshape(x.shape[0], -1)
         return self.model(x)
-
-
-# class MLP(nn.Module):
-#     def __init__(self, input_dim, num_classes):
-#         super().__init__()
-#         self.input_dim = input_dim
-#         num_inputs = 1 
-#         for dim in input_dim:
-#             num_inputs *= dim
-
-#         self.fc1 = nn.Linear(num_inputs, num_classes)
-#         # self.fc1 = nn.Linear(num_inputs, 10)
-#         # self.fc2 = nn.Linear(10, 10)
-#         # self.fc3 = nn.Linear(10, num_classes)
-    
-#     def forward(self, x):
-#         x = x.reshape(x.shape[0], -1)
-#         return self.fc1(x)
-
-#         # x = x.reshape(x.shape[0], -1)
-#         # x = F.relu(self.fc1(x))
-#         # x = F.relu(self.fc2(x))
-#         # return self.fc3(x)
 
 
 class ConvNet(nn.Module):

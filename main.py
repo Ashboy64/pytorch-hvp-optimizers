@@ -27,7 +27,7 @@ from filters import *
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10}
+DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10, 'rcv1': load_rcv1, 'fashion_mnist': load_fashion_mnist}
 MODELS = {'mlp': MLP, 'cnn': ConvNet}
 
 OPTIMIZERS = {'sgd': optim.SGD,
