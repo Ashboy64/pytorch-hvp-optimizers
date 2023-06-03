@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 class MLP(nn.Module):
     def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
+    # def __init__(self, input_dim, num_classes, hidden_sizes=[128]):
         super().__init__()
         self.input_dim = input_dim
         num_inputs = 1 
@@ -19,6 +20,7 @@ class MLP(nn.Module):
         for h_size in hidden_sizes:
             layers.append( nn.Linear(last_out_size, h_size) )
             layers.append( nn.ReLU() )
+            # layers.append( nn.Sigmoid() )
             last_out_size = h_size
         layers.append( nn.Linear(last_out_size, num_classes) )
 

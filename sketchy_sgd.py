@@ -5,9 +5,8 @@ from filters import *
 
 class SketchySGD():
     
-    def __init__(self, model, est_hessian=True, lr=3e-4, block_rank=3, rho=1e-3, h_recomp_interval=100,
+    def __init__(self, model, device, lr=3e-4, num_hvps=3, rho=1e-3, h_recomp_interval=100,
                  num_auto_lr_iter=10, filterer=None):
-        self.est_hessian = est_hessian # if False, recovers the original SketchySGD formulation
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
         self.num_auto_lr_iter = num_auto_lr_iter
@@ -18,11 +17,15 @@ class SketchySGD():
             self.filterer = filterer
 
         self.model = model
-        self.block_rank = block_rank
+        self.device = device
+        self.num_hvps = num_hvps
         self.rho = rho      # Levenberg-Marquardt Regularization
 
         self.step_count = 0
         self.h_recomp_interval = h_recomp_interval
+
+        self.V_hat = None 
+        self.Lam_hat = None
     
 
     def zero_grad(self):
@@ -40,12 +43,21 @@ class SketchySGD():
                     r_k: rank ???
         """
         with torch.no_grad():
-            p = Y.shape[0] 
-            nu = np.sqrt(p) * np.spacing(np.linalg.norm(Y))
-            # eps = 1e-6
+            p = Y.shape[0]
+            nu = 1e-6 * (p**0.5)
             Y_nu = Y + nu * Q 
-            C, _ = torch.linalg.cholesky_ex(Q.T @ Y_nu)
-            B = torch.linalg.solve_triangular(C, Y_nu.T, upper=False)
+
+            # Project to PSD matrices
+            M = Q.T @ Y_nu 
+            eigvals, eigvecs = torch.linalg.eigh(M)
+            eigvals = eigvals.real
+            selected_idxs = eigvals > 1e-6
+            eigvals = eigvals[selected_idxs]
+            eigvecs = eigvecs[:, selected_idxs]
+            
+            # Form approx eigendecomp
+            C_inv = eigvecs @ torch.diag( eigvals**-0.5 )
+            B = (Y_nu @ C_inv).T
             U, Sigma, _ = torch.linalg.svd(B.T, full_matrices=False)
             Lam_hat = torch.clip(Sigma**2 - nu, min=0)
             
@@ -80,46 +92,55 @@ class SketchySGD():
             y = (new_y / torch.linalg.norm(new_y)).reshape(*p.shape)
         
         return (1 / lmbda).item()
+
+
+    def _prepare_grad(self, grad_dict):
+        """
+        Compute gradient w.r.t loss over all parameters and vectorize
+        """
+        grad_vec = torch.cat([g.contiguous().view(-1) for g in grad_dict])
+        return grad_vec
     
-    @torch.no_grad()
+
+    # @torch.no_grad()
     def step(self, loss_tensor):
-        # Compute gradients
-        gs = torch.autograd.grad(
-            loss_tensor, self.model.parameters(), create_graph=True, 
-            retain_graph=True
+        grad_dict = torch.autograd.grad(
+            loss_tensor, self.model.parameters(), create_graph=True
         )
+        grad_vec = self._prepare_grad(grad_dict)
+        self.zero_grad()
+
+        if self.step_count % self.h_recomp_interval == 0:
+            # Form sketch
+            num_hvps = min(self.num_hvps, grad_vec.shape[0])
+            vs = torch.randn(grad_vec.shape[0], num_hvps).to(self.device)  # HVP vectors
+            vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
+
+            sketch = []
+            for i in range(num_hvps):
+                v = vs[:, i]
+                hvp_dict = torch.autograd.grad(
+                    grad_vec, self.model.parameters(), 
+                    grad_outputs=v,
+                    only_inputs=True, allow_unused=True, 
+                    retain_graph=True
+                )
+                hvp = torch.cat([g.contiguous().view(-1) for g in hvp_dict])
+                sketch.append(hvp)
+            sketch = torch.stack(sketch).T
         
-        # Join all the gradients into one long vector
-        sketch = []
-        stacked_gs = []
-        total_elements = 0
-        for g, p in zip(gs, self.model_parameters()):
-            gs += list(gs)
-            total_elements += torch.numel(p)            
-            hvp = torch.autograd.grad(
-                        g, p, 
-                        grad_outputs=v,
-                        only_inputs=True, allow_unused=True, 
-                        retain_graph=True
-                    )
-            concatenated_hvp += list(hvp[0].reshape(-1,)) # TODO: make sure this is done correctly..
-    
-        stacked_gs = torch.FloatTensor(stacked_gs)
-        sketch = torch.FloatTensor(concatenated_hvp)
-        vs = torch.randn(torch.numel(p), self.block_rank)
-        vs = torch.linalg.qr(vs, "reduced").Q
+            self.V_hat, self.Lam_hat = self.rand_nys_approx(sketch, vs)
+        all_steps = self.approx_newton_step(self.V_hat, self.Lam_hat, grad_vec).reshape(-1)
         
-        V_hat, Lam_hat = self.rand_nys_approx(sketch, vs)
-        
-        # TODO: check what Hessian blocks does here..
-        
-        all_steps = self.approx_newton_step(V_hat, Lam_hat, stacked_gs).reshape(-1)
         starting_idx = 0
-        for p in self.model_parameters():
-            step = all_steps[starting_idx:starting_idx+torch.numel(p)].reshape(*p.shape)
-            p.data.add_(self.lr * filtered_step) #using constant learning rate
-            #todo: figure this out too..
-            #step_mags.append( torch.linalg.norm(-self.curr_lrs[p_idx] * filtered_step) )
+        step_mag = 0.
+        for p_idx, p in enumerate(self.model.parameters()):
+            step = -all_steps[starting_idx : starting_idx+torch.numel(p)].reshape(*p.shape)
+            p.data.add_(self.lr * step)
             starting_idx += torch.numel(p)
-            
+            step_mag += torch.linalg.norm(self.lr * step)**2
+        step_mag = step_mag**0.5
+
         self.step_count += 1
+
+        return {'avg_lrs': self.curr_lrs}

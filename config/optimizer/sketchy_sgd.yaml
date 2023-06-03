@@ -1,0 +1,7 @@
+name: 'sketchy_sgd'
+params:
+  lr: 0.0003
+  num_hvps: 10
+  rho: 0.001  # Levenberg-Marquardt regularization
+  h_recomp_interval: 100
+  num_auto_lr_iter: 10

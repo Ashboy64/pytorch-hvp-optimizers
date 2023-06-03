@@ -16,6 +16,7 @@ from utils import *
 from data import *
 from models import * 
 
+from sketchy_sgd import *
 from block_sketchy_sgd import * 
 from generalized_bsgd import * 
 from generalized_bsgd_vectorized import * 
@@ -34,12 +35,14 @@ OPTIMIZERS = {'sgd': optim.SGD,
               'adam': optim.Adam, 
               'adamw': optim.AdamW, 
               'agd': AGD, 
+              'sketchy_sgd': SketchySGD,
               'block_sketchy_sgd': BlockSketchySGD, 
               'generalized_bsgd': GeneralizedBSGD,
               'generalized_bsgd_vectorized': GeneralizedBSGDVectorized,
-              'sketchy_system_sgd': SketchySystemSGD}
+              'sketchy_system_sgd': SketchySystemSGD
+              }
 
-CUSTOM_OPTS = ['agd', 'block_sketchy_sgd', 'generalized_bsgd', 'generalized_bsgd_vectorized', 'sketchy_system_sgd']
+CUSTOM_OPTS = ['agd', 'sketchy_sgd', 'block_sketchy_sgd', 'generalized_bsgd', 'generalized_bsgd_vectorized', 'sketchy_system_sgd']
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 
