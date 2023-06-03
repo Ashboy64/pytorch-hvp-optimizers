@@ -20,6 +20,7 @@ from sketchy_sgd import *
 from block_sketchy_sgd import * 
 from generalized_bsgd import * 
 from generalized_bsgd_vectorized import * 
+from generalized_bsgd_vectorized_trunc import * 
 from sketchy_system_sgd import * 
 from agd import * 
 
@@ -39,21 +40,26 @@ OPTIMIZERS = {'sgd': optim.SGD,
               'block_sketchy_sgd': BlockSketchySGD, 
               'generalized_bsgd': GeneralizedBSGD,
               'generalized_bsgd_vectorized': GeneralizedBSGDVectorized,
+              'generalized_bsgd_vectorized_trunc': GeneralizedBSGDVectorizedTrunc,
               'sketchy_system_sgd': SketchySystemSGD
               }
 
-CUSTOM_OPTS = ['agd', 'sketchy_sgd', 'block_sketchy_sgd', 'generalized_bsgd', 'generalized_bsgd_vectorized', 'sketchy_system_sgd']
+CUSTOM_OPTS = ['agd', 'sketchy_sgd', 
+               'block_sketchy_sgd', 'sketchy_system_sgd',
+               'generalized_bsgd', 'generalized_bsgd_vectorized', 
+               'generalized_bsgd_vectorized_trunc']
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 
+
 @torch.no_grad()
-def evaluate(model, val_loader):
+def evaluate_single(model, dataloader):
     criterion = nn.CrossEntropyLoss()
     val_loss = 0
     num_correct = 0
-    num_total = len(val_loader.dataset)
+    num_total = len(dataloader.dataset)
 
-    for batch_x, batch_y in val_loader:
+    for batch_x, batch_y in dataloader:
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
         
@@ -61,13 +67,19 @@ def evaluate(model, val_loader):
         val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
         num_correct += (logits.argmax(1) == batch_y).sum().item()
 
-    val_loss /= len(val_loader) * batch_x.shape[0]
+    val_loss /= len(dataloader) * batch_x.shape[0]
     val_accuracy = num_correct / num_total 
 
     return val_loss, val_accuracy
 
+@torch.no_grad()
+def evaluate(model, val_loader, test_loader):
+    val_metrics = evaluate_single(model, dataloader=val_loader)
+    test_metrics = evaluate_single(model, dataloader=test_loader)
+    return val_metrics, test_metrics
 
-def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs=2, verbose=False):
+
+def train(model, train_loader, val_loader, test_loader, opt_config, filter_config, num_epochs=2, verbose=False):
     criterion = nn.CrossEntropyLoss()
     opt_name = opt_config.name
     filter_name = filter_config.name
@@ -82,6 +94,7 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
 
     running_loss = 0.0
     avg_val_acc_over_epoch = 0.
+    avg_test_acc_over_epoch = 0.
 
     timestep = 0
     
@@ -105,19 +118,28 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
 
             to_log = {}
             if batch_idx == len(train_loader)-1:
-                val_loss, val_acc = evaluate(model, val_loader)
+                (val_loss, val_acc), (test_loss, test_acc) = evaluate(model, val_loader, test_loader)
                 avg_val_acc_over_epoch = (epoch_idx*avg_val_acc_over_epoch + val_acc) / (epoch_idx + 1)
+                avg_test_acc_over_epoch = (epoch_idx*avg_test_acc_over_epoch + test_acc) / (epoch_idx + 1)
                 
                 to_log['timestep'] = timestep
                 to_log['val_acc_over_epoch'] = val_acc 
                 to_log['avg_val_acc_over_epoch'] = avg_val_acc_over_epoch
+                
+                to_log['test_acc_over_epoch'] = test_acc 
+                to_log['avg_test_acc_over_epoch'] = avg_test_acc_over_epoch
 
             if batch_idx % 100 == 0:
                 if len(to_log) == 0:
-                    val_loss, val_acc = evaluate(model, val_loader)
+                    (val_loss, val_acc), (test_loss, test_acc) = \
+                        evaluate(model, val_loader, test_loader)
                     to_log['timestep'] = timestep
+                    
                     to_log['val_loss'] = val_loss
                     to_log['val_acc'] = val_acc
+
+                    to_log['test_loss'] = test_loss
+                    to_log['test_acc'] = test_acc
 
                 to_log['loss'] = train_loss
 
@@ -130,7 +152,8 @@ def train(model, train_loader, val_loader, opt_config, filter_config, num_epochs
                 if verbose:
                     out_str = f'Epoch {epoch_idx} Batch num {batch_idx}: '
                     out_str = out_str + f'train_loss={running_loss / 100:.3f}, val_loss={val_loss:.3f}, '
-                    out_str = out_str + f'val_acc={val_acc:.3f}'
+                    out_str = out_str + f'val_loss={val_loss:.3f}, val_acc={val_acc:.3f}, '
+                    out_str = out_str + f'test_loss={test_loss:.3f}, test_acc={test_acc:.3f}, '
                     print(out_str)
                 
                 running_loss = 0.0
@@ -188,13 +211,14 @@ def main(cfg):
     model = MODELS[cfg.model](info['input_dim'], 10).to(device)
     
     total_start_time = time()
-    train(model, train_loader, val_loader, 
+    train(model, 
+          train_loader, val_loader, test_loader,
           num_epochs=cfg.num_epochs, 
           opt_config=cfg.optimizer, 
           filter_config=cfg.filter,
           verbose=True)
 
-    final_val_perf = evaluate(model, val_loader)
+    # final_val_perf = evaluate(model, val_loader, test_loader)
     print(f"Total time taken for run: {time() - total_start_time}")
 
     # Flush logs

@@ -1,0 +1,7 @@
+name: 'generalized_bsgd_vectorized_trunc'
+params:
+  lr: 0.0003
+  rho: 0.001  # Levenberg-Marquardt regularization
+  num_hvps: 100
+  block_size: 10
+  h_recomp_interval: 100

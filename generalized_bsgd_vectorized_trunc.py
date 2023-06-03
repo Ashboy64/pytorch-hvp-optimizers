@@ -11,10 +11,10 @@ from functorch import vmap
 from filters import * 
 
 
-class GeneralizedBSGDVectorized:
+class GeneralizedBSGDVectorizedTrunc:
     
-    def __init__(self, model, device, lr=3e-4, num_hvps=3, block_size=3, h_recomp_interval=100,
-                 filterer=None):
+    def __init__(self, model, device, lr=3e-4, num_hvps=3, rho=1e-3, block_size=3, 
+                 h_recomp_interval=100, filterer=None):
         self.lr = lr 
         self.curr_lrs = [lr for p in model.parameters()]
 
@@ -26,6 +26,7 @@ class GeneralizedBSGDVectorized:
         self.model = model
         self.device = device
         self.num_hvps = num_hvps
+        self.rho = rho
         self.block_size = block_size
 
         self.step_count = 0
@@ -56,7 +57,8 @@ class GeneralizedBSGDVectorized:
             block_info = torch.as_tensor(block_info, dtype=torch.long, device=device)
             self.p_idx_to_block_info[p_idx] = block_info
         
-        self.inv_block_hessians = [None for p in model.parameters()]
+        self.block_Us = [None for p in model.parameters()]
+        self.block_Lams = [None for p in model.parameters()]
 
 
     def zero_grad(self):
@@ -65,18 +67,21 @@ class GeneralizedBSGDVectorized:
                 p.grad.data.zero_()
     
 
-    def compute_inv_block_hess(self, block_idx_info, mid, sketch):
-        subsketch = torch.take_along_dim(sketch, block_idx_info.reshape(-1, 1), dim=0)
-        block_hess_approx = subsketch @ mid @ subsketch.T 
-        inv_block_hess = torch.linalg.pinv(block_hess_approx, atol=1e-6)
-        return inv_block_hess
-    
-    def compute_newton_step(self, block_idx_info, inv_block_hess, g_flat):
-        if len(block_idx_info.shape) == 0:
-            return torch.Tensor().to(self.device)
-        block_step = -inv_block_hess @ torch.take_along_dim(g_flat, block_idx_info, dim=0)
-        block_step /= torch.clip(torch.linalg.norm(block_step), min=1.)
-        return block_step
+    def compute_inv_block_hess(self, block_idx_info, C_inv, sketch_T, nu):
+        subsketch_T = torch.take_along_dim(sketch_T, block_idx_info.reshape(-1, 1), dim=1)
+
+        B = C_inv.T @ subsketch_T
+        U, Sigma, _ = torch.linalg.svd(B.T, full_matrices=False)
+        Lam_hat = torch.clip(Sigma**2 - nu, min=0)
+
+        return U, Lam_hat
+
+
+    def compute_newton_step(self, block_idx_info, block_Us, block_Lams, g_flat):
+        g = -torch.take_along_dim(g_flat, block_idx_info, dim=0)
+        first_term = block_Us @ (torch.diag(1 / (block_Lams + self.rho)) @ (block_Us.T @ g))
+        second_term = (g - block_Us@(block_Us.T@g)) / self.rho
+        return first_term + second_term
 
 
     @torch.no_grad()
@@ -111,19 +116,30 @@ class GeneralizedBSGDVectorized:
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
                 sketch_T = vmap(get_hvp)(vs.T.reshape(num_hvps, *p.shape))
 
-                mid = torch.linalg.pinv(sketch_T @ vs, atol=1e-6)
+                # Shift for stability
+                nu = 1e-6 * (sketch_T.shape[1]**0.5)
+                sketch_T += nu * vs.T
+
+                eigvals, eigvecs = torch.linalg.eigh(sketch_T @ vs)
+                eigvals = eigvals.real
+                selected_idxs = eigvals > 1e-6
+                eigvals = eigvals[selected_idxs]
+                eigvecs = eigvecs[:, selected_idxs]
+                C_inv = eigvecs @ torch.diag( eigvals**-0.5 )
             
                 # Recompute pseudoinverse of block if needed
-                inv_block_hess_fn = lambda x: self.compute_inv_block_hess(x, mid=mid, sketch=sketch_T.T)
-                self.inv_block_hessians[p_idx] = vmap(inv_block_hess_fn)(self.p_idx_to_block_info[p_idx])
+                inv_block_hess_fn = lambda x: self.compute_inv_block_hess(x, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
+                self.block_Us[p_idx], self.block_Lams[p_idx] = vmap(inv_block_hess_fn)(self.p_idx_to_block_info[p_idx])
+                
                 if p_idx in self.p_idx_to_uneven_block:
                     uneven_idx_info, _ = self.p_idx_to_uneven_block[p_idx]
-                    uneven_inv_block_hess = self.compute_inv_block_hess(uneven_idx_info, mid=mid, sketch=sketch_T.T)
-                    self.p_idx_to_uneven_block[p_idx] = (uneven_idx_info, uneven_inv_block_hess)
+                    uneven_inv_block_hess = \
+                        self.compute_inv_block_hess(uneven_idx_info, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
+                    self.p_idx_to_uneven_block[p_idx] = (uneven_idx_info, *uneven_inv_block_hess)
 
             # Form approx Newton steps
-            newton_step_fn = lambda idx_info, inv_block_hess : self.compute_newton_step(idx_info, inv_block_hess, g_flat=g_flat)
-            p_step = vmap(newton_step_fn)(self.p_idx_to_block_info[p_idx], self.inv_block_hessians[p_idx]).reshape(-1,)
+            newton_step_fn = lambda idx_info, block_Us, block_Lams : self.compute_newton_step(idx_info, block_Us, block_Lams, g_flat=g_flat)
+            p_step = vmap(newton_step_fn)(self.p_idx_to_block_info[p_idx], self.block_Us[p_idx], self.block_Lams[p_idx]).reshape(-1,)
 
             if p_idx in self.p_idx_to_uneven_block:
                 block_step = self.compute_newton_step(*self.p_idx_to_uneven_block[p_idx], g_flat=g_flat)
