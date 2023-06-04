@@ -51,8 +51,8 @@ class GeneralizedBSGDVectorizedTrunc:
                 else:
                     uneven_block_info = list(range(block_start, p_size))
                     uneven_block_info = torch.as_tensor(uneven_block_info, dtype=torch.long, device=device)
-                    # (index info, inv hessian block)
-                    self.p_idx_to_uneven_block[p_idx] = (uneven_block_info, None)
+                    # (index info, inv hessian U, inv hessian Lam)
+                    self.p_idx_to_uneven_block[p_idx] = (uneven_block_info, None, None)
             
             block_info = torch.as_tensor(block_info, dtype=torch.long, device=device)
             self.p_idx_to_block_info[p_idx] = block_info
@@ -68,7 +68,7 @@ class GeneralizedBSGDVectorizedTrunc:
     
 
     def compute_inv_block_hess(self, block_idx_info, C_inv, sketch_T, nu):
-        subsketch_T = torch.take_along_dim(sketch_T, block_idx_info.reshape(-1, 1), dim=1)
+        subsketch_T = torch.take_along_dim(sketch_T, block_idx_info.reshape(1, -1), dim=1)
 
         B = C_inv.T @ subsketch_T
         U, Sigma, _ = torch.linalg.svd(B.T, full_matrices=False)
@@ -78,9 +78,16 @@ class GeneralizedBSGDVectorizedTrunc:
 
 
     def compute_newton_step(self, block_idx_info, block_Us, block_Lams, g_flat):
+        if len(block_idx_info.shape) == 0:
+            return torch.Tensor().to(self.device)
+        
         g = -torch.take_along_dim(g_flat, block_idx_info, dim=0)
-        first_term = block_Us @ (torch.diag(1 / (block_Lams + self.rho)) @ (block_Us.T @ g))
+
+        first_term = block_Us @ ((1 / (block_Lams + self.rho)) * (block_Us.T @ g))
         second_term = (g - block_Us@(block_Us.T@g)) / self.rho
+
+        # first_term = block_Us @ ((1 / (block_Lams + self.rho)).reshape(-1, 1) * (block_Us.T @ g))
+        # second_term = (g - block_Us@(block_Us.T@g)) / self.rho
         return first_term + second_term
 
 
@@ -123,16 +130,17 @@ class GeneralizedBSGDVectorizedTrunc:
                 eigvals, eigvecs = torch.linalg.eigh(sketch_T @ vs)
                 eigvals = eigvals.real
                 selected_idxs = eigvals > 1e-6
+
                 eigvals = eigvals[selected_idxs]
                 eigvecs = eigvecs[:, selected_idxs]
-                C_inv = eigvecs @ torch.diag( eigvals**-0.5 )
-            
+                C_inv = eigvecs * (eigvals**-0.5).reshape(1, -1)
+
                 # Recompute pseudoinverse of block if needed
-                inv_block_hess_fn = lambda x: self.compute_inv_block_hess(x, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
-                self.block_Us[p_idx], self.block_Lams[p_idx] = vmap(inv_block_hess_fn)(self.p_idx_to_block_info[p_idx])
+                inv_block_hess_fn = lambda x: self.compute_inv_block_hess(block_idx_info=x, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
+                self.block_Us[p_idx], self.block_Lams[p_idx] = vmap(inv_block_hess_fn, in_dims=0)(self.p_idx_to_block_info[p_idx])
                 
                 if p_idx in self.p_idx_to_uneven_block:
-                    uneven_idx_info, _ = self.p_idx_to_uneven_block[p_idx]
+                    uneven_idx_info, _, _ = self.p_idx_to_uneven_block[p_idx]
                     uneven_inv_block_hess = \
                         self.compute_inv_block_hess(uneven_idx_info, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
                     self.p_idx_to_uneven_block[p_idx] = (uneven_idx_info, *uneven_inv_block_hess)

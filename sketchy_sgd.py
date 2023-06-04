@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from functorch import vmap
 from filters import * 
 
 
@@ -66,7 +67,7 @@ class SketchySGD():
     
     def approx_newton_step(self, V_hat, Lam_hat, g):
         g = g.reshape(-1,)
-        first_term = V_hat @ (torch.diag(1 / (Lam_hat + self.rho)) @ (V_hat.T @ g))
+        first_term = V_hat @ ((1 / (Lam_hat + self.rho)) * (V_hat.T @ g))
         second_term = (g - V_hat@(V_hat.T@g)) / self.rho
 
         return first_term + second_term
@@ -116,18 +117,17 @@ class SketchySGD():
             vs = torch.randn(grad_vec.shape[0], num_hvps).to(self.device)  # HVP vectors
             vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
 
-            sketch = []
-            for i in range(num_hvps):
-                v = vs[:, i]
+            # Form sketch
+            def get_hvp(v):
                 hvp_dict = torch.autograd.grad(
-                    grad_vec, self.model.parameters(), 
-                    grad_outputs=v,
-                    only_inputs=True, allow_unused=True, 
-                    retain_graph=True
+                        grad_vec, self.model.parameters(), 
+                        grad_outputs=v,
+                        only_inputs=True, allow_unused=True, 
+                        retain_graph=True
                 )
-                hvp = torch.cat([g.contiguous().view(-1) for g in hvp_dict])
-                sketch.append(hvp)
-            sketch = torch.stack(sketch).T
+                return torch.cat([g.contiguous().view(-1) for g in hvp_dict])
+            sketch_T = vmap(get_hvp)(vs.T.reshape(num_hvps, grad_vec.shape[0]))
+            sketch = sketch_T.T
         
             self.V_hat, self.Lam_hat = self.rand_nys_approx(sketch, vs)
         all_steps = self.approx_newton_step(self.V_hat, self.Lam_hat, grad_vec).reshape(-1)
