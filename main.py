@@ -144,7 +144,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
                 to_log['loss'] = train_loss
 
                 for k in step_info:
-                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_lrs', 'avg_step_deviations', 'avg_grad_sims']:
+                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_step_rms', 'avg_lrs', 'avg_step_deviations', 'avg_grad_sims']:
                         to_log[k] = np.mean(step_info[k])
                     else:
                         to_log[k] = step_info[k]

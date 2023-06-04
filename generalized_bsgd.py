@@ -103,8 +103,8 @@ class GeneralizedBSGD:
             p_step = p_step.reshape(*p.shape)
             filtered_step = self.filterer.step(g, p_step, None, None, p_idx).reshape(*p.shape)
             p.data.add_(self.curr_lrs[p_idx] * filtered_step)
-            step_mags.append( torch.linalg.norm(self.curr_lrs[p_idx] * filtered_step) )
+            step_mags.append( torch.sqrt(torch.sum((self.curr_lrs[p_idx] * filtered_step)**2) / p_size) )
             
         self.step_count += 1
 
-        return {'avg_lrs': self.curr_lrs}
+        return {'avg_lrs': self.curr_lrs, 'avg_step_rms': step_mags}
