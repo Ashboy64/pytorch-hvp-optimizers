@@ -2,3 +2,4 @@ __pycache__
 outputs
 data
 multirun
+bert-finetuned-sem_eval-english

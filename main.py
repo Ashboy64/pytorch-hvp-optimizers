@@ -29,7 +29,7 @@ from filters import *
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10, 'rcv1': load_rcv1, 'fashion_mnist': load_fashion_mnist}
+DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10, 'rcv1': load_rcv1, 'fashion-mnist': load_fashion_mnist}
 MODELS = {'mlp': MLP, 'cnn': ConvNet}
 
 OPTIMIZERS = {'sgd': optim.SGD,
@@ -105,6 +105,10 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
             
             logits = model(batch_x)
             train_loss = criterion(logits, batch_y)
+
+            if torch.any(torch.isnan(train_loss)):
+                print("Loss is nan, terminating run")
+                return
 
             optimizer.zero_grad()
             if opt_name not in CUSTOM_OPTS:

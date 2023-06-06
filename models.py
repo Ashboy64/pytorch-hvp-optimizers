@@ -7,8 +7,8 @@ import torch.nn.functional as F
 
 
 class MLP(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
-    # def __init__(self, input_dim, num_classes, hidden_sizes=[128]):
+    # def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
+    def __init__(self, input_dim, num_classes, hidden_sizes=[100, 100, 100]):
         super().__init__()
         self.input_dim = input_dim
         num_inputs = 1 
