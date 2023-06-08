@@ -1,20 +1,23 @@
-# Adapted from https://colab.research.google.com/github/NielsRogge/Transformers-Tutorials/blob/master/BERT/Fine_tuning_BERT_(and_friends)_for_multi_label_text_classification.ipynb#scrollTo=i4ENBTdulBEI
-
+from tqdm import tqdm
 import wandb
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
+import random
 import numpy as np
+from time import time
+
 import torch
+import torch.nn as nn 
+import torch.optim as optim
+import torch.nn.functional as F
+
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 
-from torch.utils.data import DataLoader
-import torch.optim as optim
-
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from transformers import AutoModelForSequenceClassification
-from transformers import TrainingArguments, Trainer
-from transformers import EvalPrediction
+from utils import * 
+from data import *
+from models import * 
 
 from sketchy_sgd import *
 from block_sketchy_sgd import * 
@@ -24,152 +27,275 @@ from generalized_bsgd_vectorized_trunc import *
 from sketchy_system_sgd import * 
 from agd import * 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from filters import * 
 
+device = torch.device('cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+print(f"Device: {device}")
+
+
+DATASETS = {'mnist': load_mnist, 
+            'cifar-10': load_cifar10, 
+            'rcv1': load_rcv1, 
+            'fashion-mnist': load_fashion_mnist, 
+            'sentiment': load_sentiment,
+            'bert-encoded-sentiment': load_bert_encoded_sentiment}
+MODELS = {'mlp': MLP, 'cnn': ConvNet, 'bert_encoded_mlp': BertEncodedMLP}
 
 OPTIMIZERS = {'sgd': optim.SGD,
               'adam': optim.Adam, 
               'adamw': optim.AdamW, 
+              'agd': AGD, 
               'sketchy_sgd': SketchySGD,
               'block_sketchy_sgd': BlockSketchySGD, 
               'generalized_bsgd': GeneralizedBSGD,
               'generalized_bsgd_vectorized': GeneralizedBSGDVectorized,
               'generalized_bsgd_vectorized_trunc': GeneralizedBSGDVectorizedTrunc,
               'sketchy_system_sgd': SketchySystemSGD
-            }
+              }
 
 CUSTOM_OPTS = ['agd', 'sketchy_sgd', 
                'block_sketchy_sgd', 'sketchy_system_sgd',
                'generalized_bsgd', 'generalized_bsgd_vectorized', 
                'generalized_bsgd_vectorized_trunc']
 
-METRIC_NAME = "f1"
+FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
+
+LOSSES = {
+    'ce': nn.CrossEntropyLoss(),
+    'bce': nn.BCEWithLogitsLoss()
+    # 'bce': nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor(5.))
+}
 
 
-# Load dataset and tokenizer
-dataset = load_dataset("sem_eval_2018_task_1", "subtask5.english")
-labels = [label for label in dataset['train'].features.keys() if label not in ['ID', 'Tweet']]
-id2label = {idx:label for idx, label in enumerate(labels)}
-label2id = {label:idx for idx, label in enumerate(labels)}
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+# source: https://jesusleal.io/2021/04/21/Longformer-multilabel-classification/
+def multi_label_metrics(predictions, labels, threshold=0.5):
+    # first, apply sigmoid on predictions which are of shape (batch_size, num_labels)
+    sigmoid = torch.nn.Sigmoid()
+    probs = sigmoid(torch.Tensor(predictions)).cpu()
+    # next, use threshold to turn them into integer predictions
+    y_pred = np.zeros(probs.shape)
+    y_pred[np.where(probs >= threshold)] = 1
+    # finally, compute metrics
+    y_true = labels.cpu()
+    f1_micro_average = f1_score(y_true=y_true, y_pred=y_pred, average='micro')
+    roc_auc = roc_auc_score(y_true, y_pred, average = 'micro')
+    accuracy = accuracy_score(y_true, y_pred)
+    # return as dictionary
+    metrics = {'f1': f1_micro_average,
+               'roc_auc': roc_auc,
+               'acc': accuracy}
+    return metrics
 
 
-# Tokenizes and forms label matrix for a batch of tweets
-def preprocess_data(examples):
-    # encode tweets
-    text = examples["Tweet"]
-    encoding = tokenizer(text, padding="max_length", truncation=True, max_length=128)
+@torch.no_grad()
+def evaluate_single(model, dataloader, criterion):
+    loss = 0
+
+    print("Running evaluation.")
+
+    y_logits = []
+    y_true = []
+    for batch_idx, batch in enumerate(tqdm(dataloader)):
+    # for batch in dataloader:
+        if type(batch) in [tuple, list] and len(batch) == 2:
+            batch_x = batch[0].to(device)
+            batch_y = batch[1].to(device)
+        else:
+            batch_x = batch['input_ids'].to(device)
+            batch_y = batch['labels'].to(device)
+        
+        logits = model(batch_x)
+        loss += criterion(logits, batch_y).item() * batch_x.shape[0]
+
+        y_logits.append(logits)
+        y_true.append(batch_y)
+
+    y_logits = torch.concat(y_logits, dim=0)
+    y_true = torch.concat(y_true, dim=0)
+
+    metrics = multi_label_metrics(y_logits, y_true)
+    loss /= (len(dataloader) * batch_x.shape[0])
+    metrics['loss'] = loss
+
+    return metrics
+
+@torch.no_grad()
+def evaluate(model, val_loader, test_loader, criterion):
+    val_metrics = evaluate_single(model, val_loader, criterion)
+    test_metrics = evaluate_single(model, test_loader, criterion)
+    return val_metrics, test_metrics
+
+
+def train(model, train_loader, val_loader, test_loader, opt_config, filter_config, criterion, num_epochs=2, verbose=False):
+    opt_name = opt_config.name
+    filter_name = filter_config.name
     
-    # add labels
-    labels_batch = {k: examples[k] for k in examples.keys() if k in labels}
-    labels_matrix = np.zeros((len(text), len(labels)))
-    for idx, label in enumerate(labels):
-        labels_matrix[:, idx] = labels_batch[label]
-    encoding["labels"] = labels_matrix.tolist()
+    param_dims = [p.shape for p in model.parameters()]
+    filterer = FILTERS[filter_name](param_dims, **filter_config.params, device=device)
 
-    return encoding
+    if opt_name not in CUSTOM_OPTS:
+        optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_config.params)
+    else:
+        optimizer = OPTIMIZERS[opt_name](model, **opt_config.params, device=device, filterer=filterer)
+
+    running_loss = 0.0
+    avg_val_acc_over_epoch = 0.
+    avg_test_acc_over_epoch = 0.
+
+    timestep = 0
+    
+    for epoch_idx in range(num_epochs):
+        for batch_idx, batch in enumerate(tqdm(train_loader)):
+        # for batch_idx, batch in enumerate(train_loader):
+            if type(batch) in [tuple, list] and len(batch) == 2:
+                batch_x = batch[0].to(device)
+                batch_y = batch[1].to(device)
+            else:
+                batch_x = batch['input_ids'].to(device)
+                batch_y = batch['labels'].to(device)
+            
+            logits = model(batch_x)
+            train_loss = criterion(logits, batch_y)
+
+            if torch.any(torch.isnan(train_loss)):
+                print("Loss is nan, terminating run")
+                return
+
+            optimizer.zero_grad()
+            if opt_name not in CUSTOM_OPTS:
+                train_loss.backward()
+                optimizer.step()
+                step_info = {} 
+            else:
+                step_info = optimizer.step(train_loss)
+
+            running_loss += train_loss.item()
+
+            to_log = {}
+            if batch_idx == len(train_loader)-1:
+                val_metrics, test_metrics = evaluate(model, val_loader, test_loader, criterion)
+                val_acc = val_metrics['acc']
+                test_acc = test_metrics['acc']
+
+                avg_val_acc_over_epoch = (epoch_idx*avg_val_acc_over_epoch + val_acc) / (epoch_idx + 1)
+                avg_test_acc_over_epoch = (epoch_idx*avg_test_acc_over_epoch + test_acc) / (epoch_idx + 1)
+                
+                to_log['timestep'] = timestep
+                # to_log['val_acc_over_epoch'] = val_acc 
+                
+                for val_k in val_metrics:
+                    to_log[f'val/{val_k}_over_epoch'] = val_metrics[val_k]
+                for test_k in test_metrics:
+                    to_log[f'test/{test_k}_over_epoch'] = test_metrics[test_k]
+                
+                to_log['val/avg_val_acc_over_epoch'] = avg_val_acc_over_epoch
+                to_log['test/avg_test_acc_over_epoch'] = avg_test_acc_over_epoch
+                
+                # to_log['test_acc_over_epoch'] = test_acc 
+
+            if batch_idx % 250 == 0:
+                if len(to_log) == 0:
+                    val_metrics, test_metrics = evaluate(model, val_loader, test_loader, criterion)
+                    val_acc = val_metrics['acc']
+                    test_acc = test_metrics['acc']
+
+                    to_log['timestep'] = timestep
+
+                    for val_k in val_metrics:
+                        to_log[f'val/{val_k}'] = val_metrics[val_k]
+                    for test_k in test_metrics:
+                        to_log[f'test/{test_k}'] = test_metrics[test_k]
+
+                to_log['loss'] = train_loss
+
+                for k in step_info:
+                    if k in ['avg_lam_hats', 'avg_step_mags', 'avg_step_rms', 'avg_lrs', 'avg_step_deviations', 'avg_grad_sims']:
+                        to_log[k] = np.mean(step_info[k])
+                    else:
+                        to_log[k] = step_info[k]
+
+                if verbose:
+                    out_str = f'Epoch {epoch_idx} Batch num {batch_idx}: '
+                    out_str = out_str + f'train_loss={running_loss / 100:.3f}, '
+                    out_str = out_str + f'val_loss={val_metrics["loss"]:.3f}, val_acc={val_acc:.3f}, '
+                    out_str = out_str + f'test_loss={test_metrics["loss"]:.3f}, test_acc={test_acc:.3f}, '
+                    print(out_str)
+                
+                running_loss = 0.0
+
+            if len(to_log) > 0:
+                wandb.log(to_log)
+            
+            timestep += 1
+
+
+def seed(seed=0):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
-def main():
-    # Process dataset
-    encoded_dataset = dataset.map(preprocess_data, batched=True, remove_columns=dataset['train'].column_names)
-    encoded_dataset.set_format("torch")
-
-    train_dataloader = DataLoader(encoded_dataset["train"], CONFIG['batch_size'], shuffle=True)
-    val_dataloader = DataLoader(encoded_dataset["validation"], CONFIG['batch_size'], shuffle=False)
-    test_dataloader = DataLoader(encoded_dataset["test"], CONFIG['batch_size'], shuffle=False)
-
-    # Load model
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased", 
-                                                            problem_type="multi_label_classification", 
-                                                            num_labels=len(labels),
-                                                            id2label=id2label,
-                                                            label2id=label2id).to(device)
+def main(cfg):
+    # Setup W&B logging
+    experiment_name = f"{cfg.wandb.experiment_name_prefix}_{cfg.optimizer.name}_{cfg.dataset}_{cfg.filter.name}_filter_seed_{cfg.seed}"
+    if 'lr' in cfg.optimizer.params:
+        experiment_name += f'_lr_{cfg.optimizer.params.lr}'
     
-    print(model.__dict__)
+    log_config_dict = {
+        "opt_name": cfg.optimizer.name,
+        "filter_name": cfg.filter.name,
+        "dataset": cfg.dataset, 
+        "batch_size": cfg.batch_size,
+        "num_epochs": cfg.num_epochs,
+        "model": cfg.model,
+        "seed": cfg.seed, 
+        "full_config": cfg
+    }
 
-    # Fine tune only classification heads
-    for param in model.base_model.parameters():
-        param.requires_grad = False
+    if "lr" in cfg.optimizer.params:
+        log_config_dict["lr"] = cfg.optimizer.params.lr,
 
-    # Initialize optimizer
-    if CONFIG['optimizer'] not in CUSTOM_OPTS:
-        optimizer = OPTIMIZERS[CONFIG['optimizer']](model.parameters(), CONFIG['lr'])
-    else:
-        optimizer = OPTIMIZERS[CONFIG['optimizer']](model, )
+    wandb.init(
+        project = cfg.wandb.project,
+        name    = experiment_name,
+        entity  = "ee364b-final-project",
+        config  = log_config_dict, 
+        mode    = cfg.wandb.mode
+    )
 
-    # Main train loop
-    for batch_idx, batch in enumerate(tqdm(train_dataloader)):
-        outputs = model(input_ids=batch['input_ids'].to(device), 
-                        labels=batch['labels'].to(device))
-        train_loss = outputs['loss']
+    # Run experiment
+    seed(cfg.seed)
+    
+    train_loader, val_loader, test_loader, dataset_info = DATASETS[cfg.dataset](cfg.batch_size)
 
-        optimizer.zero_grad()
-        train_loss.backward()
-        optimizer.step()
+    print(f"train set size: {len(train_loader)}")
+    print(f"val set size: {len(val_loader)}")
+    print(f"test set size: {len(test_loader)}")
+
+    model = MODELS[cfg.model](dataset_info).to(device)
+    loss_fn = LOSSES[cfg.loss]
+    
+    total_start_time = time()
+    train(model, 
+          train_loader, val_loader, test_loader,
+          num_epochs=cfg.num_epochs, 
+          opt_config=cfg.optimizer, 
+          filter_config=cfg.filter,
+          criterion=loss_fn,
+          verbose=True)
+
+    # final_val_perf = evaluate(model, val_loader, test_loader)
+    print(f"Total time taken for run: {time() - total_start_time}")
+
+    # Flush logs
+    wandb.finish()
 
 
 if __name__ == '__main__':
     main()
 
-
-# # Evaluation metrics
-# # source: https://jesusleal.io/2021/04/21/Longformer-multilabel-classification/
-# def multi_label_metrics(predictions, labels, threshold=0.5):
-#     # first, apply sigmoid on predictions which are of shape (batch_size, num_labels)
-#     sigmoid = torch.nn.Sigmoid()
-#     probs = sigmoid(torch.Tensor(predictions))
-#     # next, use threshold to turn them into integer predictions
-#     y_pred = np.zeros(probs.shape)
-#     y_pred[np.where(probs >= threshold)] = 1
-#     # finally, compute metrics
-#     y_true = labels
-#     f1_micro_average = f1_score(y_true=y_true, y_pred=y_pred, average='micro')
-#     roc_auc = roc_auc_score(y_true, y_pred, average = 'micro')
-#     accuracy = accuracy_score(y_true, y_pred)
-#     # return as dictionary
-#     metrics = {'f1': f1_micro_average,
-#                'roc_auc': roc_auc,
-#                'accuracy': accuracy}
-#     return metrics
-
-# def compute_metrics(p: EvalPrediction):
-#     preds = p.predictions[0] if isinstance(p.predictions, 
-#             tuple) else p.predictions
-#     result = multi_label_metrics(
-#         predictions=preds, 
-#         labels=p.label_ids)
-#     return result
-
-
-
-# # Using HuggingFace trainer
-# # Main training call
-# args = TrainingArguments(
-#     f"bert-finetuned-sem_eval-english",
-#     evaluation_strategy = "epoch",
-#     save_strategy = "epoch",
-#     learning_rate=2e-5,
-#     per_device_train_batch_size=batch_size,
-#     per_device_eval_batch_size=batch_size,
-#     num_train_epochs=5,
-#     weight_decay=0.01,
-#     load_best_model_at_end=True,
-#     metric_for_best_model=metric_name,
-#     #push_to_hub=True,
-# )
-
-# trainer = Trainer(
-#     model,
-#     args,
-#     train_dataset=encoded_dataset["train"],
-#     eval_dataset=encoded_dataset["validation"],
-#     tokenizer=tokenizer,
-#     compute_metrics=compute_metrics
-# )
-
-# trainer.train()
-
-# # Evaluate model 
-# trainer.evaluate()

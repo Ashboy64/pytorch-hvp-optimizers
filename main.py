@@ -89,8 +89,6 @@ def evaluate_single(model, dataloader, criterion):
             preds = (logits > 0.).float()
             num_correct = torch.all(preds == batch_y, dim=1).sum().item()
 
-
-            
             # num_correct += (preds == batch_y).sum().item()
 
             # print(preds)

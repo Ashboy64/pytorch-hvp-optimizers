@@ -200,9 +200,9 @@ def load_sentiment(batch_size):
     encoded_dataset = dataset.map(preprocess_data, batched=True, remove_columns=dataset['train'].column_names)
     encoded_dataset.set_format("torch")
 
-    train_dataloader = DataLoader(encoded_dataset["train"], batch_size, shuffle=True)
-    val_dataloader = DataLoader(encoded_dataset["validation"], batch_size, shuffle=False)
-    test_dataloader = DataLoader(encoded_dataset["test"], batch_size, shuffle=False)
+    train_dataloader = DataLoader(encoded_dataset["train"], batch_size, pin_memory=True, shuffle=True)
+    val_dataloader = DataLoader(encoded_dataset["validation"], batch_size, pin_memory=True, shuffle=False)
+    test_dataloader = DataLoader(encoded_dataset["test"], batch_size, pin_memory=True, shuffle=False)
 
     info = {
         "encoder_dim": (768,),
