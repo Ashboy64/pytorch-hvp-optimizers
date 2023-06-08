@@ -1,6 +1,8 @@
 # Adapted from https://colab.research.google.com/github/NielsRogge/Transformers-Tutorials/blob/master/BERT/Fine_tuning_BERT_(and_friends)_for_multi_label_text_classification.ipynb#scrollTo=i4ENBTdulBEI
 
 import wandb
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 import numpy as np
@@ -8,13 +10,12 @@ import torch
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 
 from torch.utils.data import DataLoader
+import torch.nn as nn
 import torch.optim as optim
 
+
 from datasets import load_dataset
-from transformers import AutoTokenizer
-from transformers import AutoModelForSequenceClassification
-from transformers import TrainingArguments, Trainer
-from transformers import EvalPrediction
+from transformers import BertTokenizer, BertModel
 
 from sketchy_sgd import *
 from block_sketchy_sgd import * 
@@ -51,7 +52,7 @@ dataset = load_dataset("sem_eval_2018_task_1", "subtask5.english")
 labels = [label for label in dataset['train'].features.keys() if label not in ['ID', 'Tweet']]
 id2label = {idx:label for idx, label in enumerate(labels)}
 label2id = {label:idx for idx, label in enumerate(labels)}
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 
 # Tokenizes and forms label matrix for a batch of tweets
@@ -69,45 +70,49 @@ def preprocess_data(examples):
 
     return encoding
 
-
 @hydra.main(version_base=None, config_path="config", config_name="config")
-def main():
+def main(cfg):
     # Process dataset
     encoded_dataset = dataset.map(preprocess_data, batched=True, remove_columns=dataset['train'].column_names)
     encoded_dataset.set_format("torch")
 
-    train_dataloader = DataLoader(encoded_dataset["train"], CONFIG['batch_size'], shuffle=True)
-    val_dataloader = DataLoader(encoded_dataset["validation"], CONFIG['batch_size'], shuffle=False)
-    test_dataloader = DataLoader(encoded_dataset["test"], CONFIG['batch_size'], shuffle=False)
+    train_dataloader = DataLoader(encoded_dataset["train"], cfg.batch_size, shuffle=True)
+    val_dataloader = DataLoader(encoded_dataset["validation"], cfg.batch_size, shuffle=False)
+    test_dataloader = DataLoader(encoded_dataset["test"], cfg.batch_size, shuffle=False)
 
     # Load model
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased", 
-                                                            problem_type="multi_label_classification", 
-                                                            num_labels=len(labels),
-                                                            id2label=id2label,
-                                                            label2id=label2id).to(device)
-    
-    print(model.__dict__)
-
-    # Fine tune only classification heads
-    for param in model.base_model.parameters():
-        param.requires_grad = False
+    encoder = BertModel.from_pretrained("bert-base-uncased")
+    classifier = nn.Sequential(
+        nn.Linear(768, 512),
+        nn.ReLU(),
+        nn.Linear(512, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, len(labels))
+    )
 
     # Initialize optimizer
     if CONFIG['optimizer'] not in CUSTOM_OPTS:
-        optimizer = OPTIMIZERS[CONFIG['optimizer']](model.parameters(), CONFIG['lr'])
+        optimizer = OPTIMIZERS[CONFIG['optimizer']](classifier.parameters(), CONFIG['lr'])
     else:
-        optimizer = OPTIMIZERS[CONFIG['optimizer']](model, )
+        optimizer = OPTIMIZERS[CONFIG['optimizer']](classifier, )
 
     # Main train loop
     for batch_idx, batch in enumerate(tqdm(train_dataloader)):
-        outputs = model(input_ids=batch['input_ids'].to(device), 
-                        labels=batch['labels'].to(device))
-        train_loss = outputs['loss']
+        
+        bert_encoding = encoder(batch['input_ids'])
+        print(bert_encoding.pooler_output.shape)
 
-        optimizer.zero_grad()
-        train_loss.backward()
-        optimizer.step()
+        if batch_idx >= 5:
+            break
+        # outputs = model(input_ids=batch['input_ids'].to(device), 
+        #                 labels=batch['labels'].to(device))
+        # train_loss = outputs['loss']
+
+        # optimizer.zero_grad()
+        # train_loss.backward()
+        # optimizer.step()
 
 
 if __name__ == '__main__':

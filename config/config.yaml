@@ -9,6 +9,7 @@ batch_size: 64
 num_epochs: 2
 dataset: 'mnist'
 model: 'mlp'
+loss: 'ce' # [ce, bce]
 
 wandb:
   mode: null

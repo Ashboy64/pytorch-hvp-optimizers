@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -29,8 +30,12 @@ from filters import *
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-DATASETS = {'mnist': load_mnist, 'cifar-10': load_cifar10, 'rcv1': load_rcv1, 'fashion-mnist': load_fashion_mnist}
-MODELS = {'mlp': MLP, 'cnn': ConvNet}
+DATASETS = {'mnist': load_mnist, 
+            'cifar-10': load_cifar10, 
+            'rcv1': load_rcv1, 
+            'fashion-mnist': load_fashion_mnist, 
+            'sentiment': load_sentiment}
+MODELS = {'mlp': MLP, 'cnn': ConvNet, 'bert_encoded_mlp': BertEncodedMLP}
 
 OPTIMIZERS = {'sgd': optim.SGD,
               'adam': optim.Adam, 
@@ -51,21 +56,36 @@ CUSTOM_OPTS = ['agd', 'sketchy_sgd',
 
 FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 
+LOSSES = {
+    'ce': nn.CrossEntropyLoss(),
+    'bce': nn.BCEWithLogitsLoss()
+}
+
 
 @torch.no_grad()
-def evaluate_single(model, dataloader):
-    criterion = nn.CrossEntropyLoss()
+def evaluate_single(model, dataloader, criterion):
     val_loss = 0
     num_correct = 0
     num_total = len(dataloader.dataset)
 
-    for batch_x, batch_y in dataloader:
-        batch_x = batch_x.to(device)
-        batch_y = batch_y.to(device)
+    # print("Running evaluation.")
+    # for batch in tqdm(dataloader):
+    for batch in dataloader:
+        if type(batch) in [tuple, list] and len(batch) == 2:
+            batch_x = batch[0].to(device)
+            batch_y = batch[1].to(device)
+        else:
+            batch_x = batch['input_ids'].to(device)
+            batch_y = batch['labels'].to(device)
         
         logits = model(batch_x)
         val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
-        num_correct += (logits.argmax(1) == batch_y).sum().item()
+
+        if len(batch_y.shape) == 1:
+            num_correct += (logits.argmax(1) == batch_y).sum().item()
+        else:
+            preds = (logits > 0.).float()
+            num_correct += (preds == batch_y).sum().item()
 
     val_loss /= len(dataloader) * batch_x.shape[0]
     val_accuracy = num_correct / num_total 
@@ -73,14 +93,13 @@ def evaluate_single(model, dataloader):
     return val_loss, val_accuracy
 
 @torch.no_grad()
-def evaluate(model, val_loader, test_loader):
-    val_metrics = evaluate_single(model, dataloader=val_loader)
-    test_metrics = evaluate_single(model, dataloader=test_loader)
+def evaluate(model, val_loader, test_loader, criterion):
+    val_metrics = evaluate_single(model, val_loader, criterion)
+    test_metrics = evaluate_single(model, test_loader, criterion)
     return val_metrics, test_metrics
 
 
-def train(model, train_loader, val_loader, test_loader, opt_config, filter_config, num_epochs=2, verbose=False):
-    criterion = nn.CrossEntropyLoss()
+def train(model, train_loader, val_loader, test_loader, opt_config, filter_config, criterion, num_epochs=2, verbose=False):
     opt_name = opt_config.name
     filter_name = filter_config.name
     
@@ -99,9 +118,14 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
     timestep = 0
     
     for epoch_idx in range(num_epochs):
-        for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+        # for batch_idx, batch in enumerate(tqdm(train_loader)):
+        for batch_idx, batch in enumerate(train_loader):
+            if type(batch) in [tuple, list] and len(batch) == 2:
+                batch_x = batch[0].to(device)
+                batch_y = batch[1].to(device)
+            else:
+                batch_x = batch['input_ids'].to(device)
+                batch_y = batch['labels'].to(device)
             
             logits = model(batch_x)
             train_loss = criterion(logits, batch_y)
@@ -122,7 +146,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
 
             to_log = {}
             if batch_idx == len(train_loader)-1:
-                (val_loss, val_acc), (test_loss, test_acc) = evaluate(model, val_loader, test_loader)
+                (val_loss, val_acc), (test_loss, test_acc) = evaluate(model, val_loader, test_loader, criterion)
                 avg_val_acc_over_epoch = (epoch_idx*avg_val_acc_over_epoch + val_acc) / (epoch_idx + 1)
                 avg_test_acc_over_epoch = (epoch_idx*avg_test_acc_over_epoch + test_acc) / (epoch_idx + 1)
                 
@@ -136,7 +160,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
             if batch_idx % 100 == 0:
                 if len(to_log) == 0:
                     (val_loss, val_acc), (test_loss, test_acc) = \
-                        evaluate(model, val_loader, test_loader)
+                        evaluate(model, val_loader, test_loader, criterion)
                     to_log['timestep'] = timestep
                     
                     to_log['val_loss'] = val_loss
@@ -206,13 +230,14 @@ def main(cfg):
     # Run experiment
     seed(cfg.seed)
     
-    train_loader, val_loader, test_loader, info = DATASETS[cfg.dataset](cfg.batch_size)
+    train_loader, val_loader, test_loader, dataset_info = DATASETS[cfg.dataset](cfg.batch_size)
 
     print(f"train set size: {len(train_loader)}")
     print(f"val set size: {len(val_loader)}")
     print(f"test set size: {len(test_loader)}")
 
-    model = MODELS[cfg.model](info['input_dim'], 10).to(device)
+    model = MODELS[cfg.model](dataset_info).to(device)
+    loss_fn = LOSSES[cfg.loss]
     
     total_start_time = time()
     train(model, 
@@ -220,6 +245,7 @@ def main(cfg):
           num_epochs=cfg.num_epochs, 
           opt_config=cfg.optimizer, 
           filter_config=cfg.filter,
+          criterion=loss_fn,
           verbose=True)
 
     # final_val_perf = evaluate(model, val_loader, test_loader)

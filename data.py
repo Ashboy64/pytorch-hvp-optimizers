@@ -1,11 +1,17 @@
+import numpy as np 
 import torch
-import skorch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torchvision import datasets
+
+import torchvision
 from torchvision import transforms
+
+import skorch
 from sklearn.datasets import fetch_rcv1
 from sklearn.model_selection import train_test_split
+
+from datasets import load_dataset
+from transformers import BertTokenizer
 
 
 # Over channel dims
@@ -37,8 +43,8 @@ def load_mnist(batch_size):
         transforms.Normalize((0.1307,), (0.3081,)),
     ])
 
-    train_set = datasets.MNIST('data/mnist', train=True, download=True, transform=transform)
-    test_set = datasets.MNIST('data/mnist', train=False, transform=transform)
+    train_set = torchvision.datasets.MNIST('data/mnist', train=True, download=True, transform=transform)
+    test_set = torchvision.datasets.MNIST('data/mnist', train=False, transform=transform)
 
     train_set_size = int(len(train_set) * 0.8)
     val_set_size = len(train_set) - train_set_size
@@ -52,7 +58,7 @@ def load_mnist(batch_size):
     val_loader = DataLoader(val_set, batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    info = {'input_dim': (1, 28, 28)}
+    info = {'input_dim': (1, 28, 28), 'num_classes': 10}
 
     return train_loader, val_loader, test_loader, info
 
@@ -62,8 +68,8 @@ def load_cifar10(batch_size):
                [transforms.ToTensor(),
                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-    train_set = datasets.CIFAR10(root='data/cifar10', download=True, transform=transform)
-    test_set = datasets.CIFAR10(root='data/cifar10', train=False, transform=transform)
+    train_set = torchvision.datasets.CIFAR10(root='data/cifar10', download=True, transform=transform)
+    test_set = torchvision.datasets.CIFAR10(root='data/cifar10', train=False, transform=transform)
     
     train_set_size = int(len(train_set) * 0.8)
     val_set_size = len(train_set) - train_set_size
@@ -78,7 +84,7 @@ def load_cifar10(batch_size):
     val_loader = DataLoader(val_set, batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    info = {'input_dim': (3, 32, 32)}
+    info = {'input_dim': (3, 32, 32), 'num_classes': 10}
     
     return train_loader, val_loader, test_loader, info
 
@@ -98,7 +104,7 @@ def load_rcv1(batch_size):
     val_loader = DataLoader(val_set, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    info = {'input_dim': (X_train.shape[0],)}
+    info = {'input_dim': (X_train.shape[0],), 'num_classes': 10}
     
     return train_loader, val_loader, test_loader, info
 
@@ -109,8 +115,8 @@ def load_fashion_mnist(batch_size):
         transforms.Normalize((0.2861,), (0.3530,))
     ])
 
-    train_set = datasets.FashionMNIST(root='data/fashion_mnist', download=True, transform=transform)
-    test_set = datasets.FashionMNIST(root='data/fashion_mnist', train=False, transform=transform)
+    train_set = torchvision.datasets.FashionMNIST(root='data/fashion_mnist', download=True, transform=transform)
+    test_set = torchvision.datasets.FashionMNIST(root='data/fashion_mnist', train=False, transform=transform)
 
     train_set_size = int(len(train_set) * 0.8)
     val_set_size = len(train_set) - train_set_size
@@ -125,6 +131,46 @@ def load_fashion_mnist(batch_size):
     val_loader = DataLoader(val_set, batch_size, shuffle=False)
     test_loader = DataLoader(test_set, batch_size, shuffle=False)
 
-    info = {'input_dim': (1, 28, 28)}
+    info = {'input_dim': (1, 28, 28), 'num_classes': 10}
     
     return train_loader, val_loader, test_loader, info
+
+
+def load_sentiment(batch_size):
+    dataset = load_dataset("sem_eval_2018_task_1", "subtask5.english")
+    labels = [label for label in dataset['train'].features.keys() if label not in ['ID', 'Tweet']]
+    id2label = {idx:label for idx, label in enumerate(labels)}
+    label2id = {label:idx for idx, label in enumerate(labels)}
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+    def preprocess_data(examples):
+        # encode tweets
+        text = examples["Tweet"]
+        encoding = tokenizer(text, padding="max_length", truncation=True, max_length=128)
+        
+        # add labels
+        labels_batch = {k: examples[k] for k in examples.keys() if k in labels}
+        labels_matrix = np.zeros((len(text), len(labels)))
+        for idx, label in enumerate(labels):
+            labels_matrix[:, idx] = labels_batch[label]
+        encoding["labels"] = labels_matrix.tolist()
+
+        return encoding
+    
+    encoded_dataset = dataset.map(preprocess_data, batched=True, remove_columns=dataset['train'].column_names)
+    encoded_dataset.set_format("torch")
+
+    train_dataloader = DataLoader(encoded_dataset["train"], batch_size, shuffle=True)
+    val_dataloader = DataLoader(encoded_dataset["validation"], batch_size, shuffle=False)
+    test_dataloader = DataLoader(encoded_dataset["test"], batch_size, shuffle=False)
+
+    info = {
+        "encoder_dim": (768,),
+        "num_classes": 11,
+        "tokenizer": tokenizer,
+        "id2label": id2label,
+        "label2id": label2id,
+        "num_classes": 11
+    }
+
+    return train_dataloader, val_dataloader, test_dataloader, info
