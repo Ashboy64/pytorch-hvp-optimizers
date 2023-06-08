@@ -1,3 +1,6 @@
+import os 
+from tqdm import tqdm
+
 import numpy as np 
 import torch
 from torch.utils.data import Dataset
@@ -11,7 +14,9 @@ from sklearn.datasets import fetch_rcv1
 from sklearn.model_selection import train_test_split
 
 from datasets import load_dataset
-from transformers import BertTokenizer
+from transformers import BertTokenizer, BertModel
+
+from models import * 
 
 
 # Over channel dims
@@ -136,6 +141,41 @@ def load_fashion_mnist(batch_size):
     return train_loader, val_loader, test_loader, info
 
 
+class BertEncodedSentimentDataset(Dataset):
+    def __init__(self, split, data_dir=f'data/bert_sentiment'):
+        assert split in ('train', 'val', 'test')
+        self.xs = torch.load(os.path.join(data_dir, split, f'{split}_x.pt'))
+        self.ys = torch.load(os.path.join(data_dir, split, f'{split}_y.pt'))
+
+        print(f"len xs: {self.xs.shape[0]}")
+
+        assert self.xs.shape[0] == self.ys.shape[0]
+    
+    def get_info(self):
+        return {
+            'input_dim': (self.xs.shape[1],),
+            'num_classes': self.ys.shape[1]
+        }
+
+    def __len__(self):
+        return self.xs.shape[0]
+    
+    def __getitem__(self, idx):
+        return self.xs[idx, :], self.ys[idx, :]
+
+
+def load_bert_encoded_sentiment(batch_size):
+    data_dir = f'data/bert_sentiment'
+    train_dataloader = DataLoader(BertEncodedSentimentDataset('train', data_dir=data_dir),
+                                  batch_size, shuffle=True)
+    val_dataloader = DataLoader(BertEncodedSentimentDataset('val', data_dir=data_dir),
+                                  batch_size, shuffle=False)
+    test_dataloader = DataLoader(BertEncodedSentimentDataset('test', data_dir=data_dir),
+                                  batch_size, shuffle=False)
+    info = train_dataloader.dataset.get_info()
+    return train_dataloader, val_dataloader, test_dataloader, info
+
+
 def load_sentiment(batch_size):
     dataset = load_dataset("sem_eval_2018_task_1", "subtask5.english")
     labels = [label for label in dataset['train'].features.keys() if label not in ['ID', 'Tweet']]
@@ -174,3 +214,46 @@ def load_sentiment(batch_size):
     }
 
     return train_dataloader, val_dataloader, test_dataloader, info
+
+
+def create_sentiment():
+    device = torch.device('cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    print(f"Device: {device}")
+
+    split_names = ('train', 'val', 'test')
+    save_path = f'data/bert_sentiment'
+    if not os.path.isdir(save_path):
+        for split_name in split_names:
+            os.makedirs(os.path.join(save_path, split_name))
+
+    sentiment_data = load_sentiment(8)
+    # model = BertEncodedMLP(sentiment_data[-1]).to(device)
+    model = BertModel.from_pretrained('bert-base-uncased').to(device)
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    for split_name, split in zip(('train', 'val', 'test'), sentiment_data[:-1]):
+        print(f"Saving {split_name} samples")
+        
+        xs = []
+        ys = []
+        
+        for batch in tqdm(split):
+            # xs.append(model.encoder(batch['input_ids'].to(device)).pooler_output)
+            xs.append(model(batch['input_ids'].to(device)).pooler_output)
+            # print(xs[0].shape)
+            ys.append(batch['labels'].to(device))
+        
+        xs = torch.concat(xs, dim=0)
+        ys = torch.concat(ys, dim=0)
+
+        torch.save(xs, os.path.join(save_path, split_name, f'{split_name}_x.pt'))
+        torch.save(ys, os.path.join(save_path, split_name, f'{split_name}_y.pt'))
+
+
+if __name__ == '__main__':
+    create_sentiment()

@@ -34,7 +34,8 @@ DATASETS = {'mnist': load_mnist,
             'cifar-10': load_cifar10, 
             'rcv1': load_rcv1, 
             'fashion-mnist': load_fashion_mnist, 
-            'sentiment': load_sentiment}
+            'sentiment': load_sentiment,
+            'bert-encoded-sentiment': load_bert_encoded_sentiment}
 MODELS = {'mlp': MLP, 'cnn': ConvNet, 'bert_encoded_mlp': BertEncodedMLP}
 
 OPTIMIZERS = {'sgd': optim.SGD,
@@ -59,6 +60,7 @@ FILTERS = {'identity': IdentityFilter, 'momentum': MomentumFilter}
 LOSSES = {
     'ce': nn.CrossEntropyLoss(),
     'bce': nn.BCEWithLogitsLoss()
+    # 'bce': nn.BCEWithLogitsLoss(pos_weight=torch.as_tensor(5.))
 }
 
 
@@ -85,9 +87,22 @@ def evaluate_single(model, dataloader, criterion):
             num_correct += (logits.argmax(1) == batch_y).sum().item()
         else:
             preds = (logits > 0.).float()
-            num_correct += (preds == batch_y).sum().item()
+            num_correct = torch.all(preds == batch_y, dim=1).sum().item()
 
-    val_loss /= len(dataloader) * batch_x.shape[0]
+
+            
+            # num_correct += (preds == batch_y).sum().item()
+
+            # print(preds)
+            # print(batch_y)
+            
+            # num_total corresponds to the total number of elements in a grid 
+            # with len(dataloader.dataset) rows and batch_y.shape[1] columns.
+            # num_total is initialized to be the number of elements in one col,
+            # here we add back the rest to get the correct num_total
+            # num_total += batch_y.shape[0] * (batch_y.shape[1] - 1)
+
+    val_loss /= (len(dataloader) * batch_x.shape[0])
     val_accuracy = num_correct / num_total 
 
     return val_loss, val_accuracy

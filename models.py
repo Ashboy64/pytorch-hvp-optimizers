@@ -9,7 +9,8 @@ from transformers import AutoModel
 
 class MLP(nn.Module):
     # def __init__(self, input_dim, num_classes, hidden_sizes=[128, 64, 32, 16]):
-    def __init__(self, dataset_info, hidden_sizes=[100, 100, 100]):
+    # def __init__(self, dataset_info, hidden_sizes=[100, 100, 100]): USE FOR FASHION MNIST RESULTS
+    def __init__(self, dataset_info, hidden_sizes=[]): # USE FOR BERT_ENCODED_SENTIMENT RESULTS
         super().__init__()
         self.input_dim = dataset_info['input_dim']
         num_inputs = 1 
@@ -62,6 +63,9 @@ class BertEncodedMLP:
         super().__init__()
 
         self.encoder = AutoModel.from_pretrained(encoder_model)
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
         classifier_data_info = {'input_dim': (encoding_dim,), 'num_classes': dataset_info['num_classes']}
         self.classifier = MLP(classifier_data_info, hidden_sizes)
     
