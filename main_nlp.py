@@ -42,7 +42,8 @@ DATASETS = {'mnist': load_mnist,
             'rcv1': load_rcv1, 
             'fashion-mnist': load_fashion_mnist, 
             'sentiment': load_sentiment,
-            'bert-encoded-sentiment': load_bert_encoded_sentiment}
+            'bert-encoded-sentiment': load_bert_encoded_sentiment,
+            'yelp': load_yelp}
 MODELS = {'mlp': MLP, 'cnn': ConvNet, 'bert_encoded_mlp': BertEncodedMLP}
 
 OPTIMIZERS = {'sgd': optim.SGD,
@@ -91,37 +92,87 @@ def multi_label_metrics(predictions, labels, threshold=0.5):
     return metrics
 
 
+# @torch.no_grad()
+# def evaluate_single(model, dataloader, criterion):
+#     loss = 0
+
+#     print("Running evaluation.")
+
+#     y_logits = []
+#     y_true = []
+#     for batch_idx, batch in enumerate(tqdm(dataloader)):
+#     # for batch in dataloader:
+#         if type(batch) in [tuple, list] and len(batch) == 2:
+#             batch_x = batch[0].to(device)
+#             batch_y = batch[1].to(device)
+#         else:
+#             batch_x = batch['input_ids'].to(device)
+#             batch_y = batch['stars'].to(device) - 1
+        
+#         logits = model(batch_x)
+#         loss += criterion(logits, batch_y).item() * batch_x.shape[0]
+
+#         y_logits.append(logits)
+#         y_true.append(batch_y)
+
+#         if batch_idx > 3: break
+
+#     y_logits = torch.concat(y_logits, dim=0)
+#     y_true = torch.concat(y_true, dim=0)
+
+#     # metrics = multi_label_metrics(y_logits, y_true)
+#     metrics = {}
+#     loss /= (len(dataloader) * batch_x.shape[0])
+#     metrics['loss'] = loss
+
+    # return metrics
+
+
 @torch.no_grad()
 def evaluate_single(model, dataloader, criterion):
-    loss = 0
+    val_loss = 0
+    num_correct = 0
+    num_total = len(dataloader.dataset)
 
-    print("Running evaluation.")
-
-    y_logits = []
-    y_true = []
+    # print("Running evaluation.")
+    # for batch in tqdm(dataloader):
     for batch_idx, batch in enumerate(tqdm(dataloader)):
-    # for batch in dataloader:
         if type(batch) in [tuple, list] and len(batch) == 2:
             batch_x = batch[0].to(device)
             batch_y = batch[1].to(device)
         else:
             batch_x = batch['input_ids'].to(device)
-            batch_y = batch['labels'].to(device)
+            batch_y = batch['stars'].to(device) # - 1
         
         logits = model(batch_x)
-        loss += criterion(logits, batch_y).item() * batch_x.shape[0]
+        val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
 
-        y_logits.append(logits)
-        y_true.append(batch_y)
+        if len(batch_y.shape) == 1:
+            num_correct += (logits.argmax(1) == batch_y).sum().item()
+        else:
+            preds = (logits > 0.).float()
+            num_correct = torch.all(preds == batch_y, dim=1).sum().item()
 
-    y_logits = torch.concat(y_logits, dim=0)
-    y_true = torch.concat(y_true, dim=0)
+            # num_correct += (preds == batch_y).sum().item()
 
-    metrics = multi_label_metrics(y_logits, y_true)
-    loss /= (len(dataloader) * batch_x.shape[0])
-    metrics['loss'] = loss
+            # print(preds)
+            # print(batch_y)
+            
+            # num_total corresponds to the total number of elements in a grid 
+            # with len(dataloader.dataset) rows and batch_y.shape[1] columns.
+            # num_total is initialized to be the number of elements in one col,
+            # here we add back the rest to get the correct num_total
+            # num_total += batch_y.shape[0] * (batch_y.shape[1] - 1)
+
+    val_loss /= (len(dataloader) * batch_x.shape[0])
+    val_accuracy = num_correct / num_total 
+    metrics = {
+        'loss': val_loss,
+        'acc': val_accuracy
+    }
 
     return metrics
+
 
 @torch.no_grad()
 def evaluate(model, val_loader, test_loader, criterion):
@@ -156,7 +207,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
                 batch_y = batch[1].to(device)
             else:
                 batch_x = batch['input_ids'].to(device)
-                batch_y = batch['labels'].to(device)
+                batch_y = batch['stars'].to(device) # - 1
             
             logits = model(batch_x)
             train_loss = criterion(logits, batch_y)

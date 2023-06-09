@@ -206,11 +206,37 @@ def load_sentiment(batch_size):
 
     info = {
         "encoder_dim": (768,),
-        "num_classes": 11,
         "tokenizer": tokenizer,
         "id2label": id2label,
         "label2id": label2id,
         "num_classes": 11
+    }
+
+    return train_dataloader, val_dataloader, test_dataloader, info
+
+
+def load_yelp(batch_size):
+    dataset = load_dataset("codyburker/yelp_review_sampled")
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], padding="max_length", truncation=True)
+
+    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+    tokenized_datasets.set_format("torch")
+
+    small_train = tokenized_datasets["train"].shuffle(seed=42).select(range(10000))
+    small_val = tokenized_datasets["train"].shuffle(seed=42).select(range(10000, 11000))
+    small_test = tokenized_datasets["test"].shuffle(seed=42).select(range(1000))
+
+    train_dataloader = DataLoader(small_train, batch_size, pin_memory=True, shuffle=True)
+    val_dataloader = DataLoader(small_val, batch_size, pin_memory=True, shuffle=False)
+    test_dataloader = DataLoader(small_test, batch_size, pin_memory=True, shuffle=False)
+
+    info = {
+        "encoder_dim": (768,),
+        "tokenizer": tokenizer,
+        "num_classes": 6
     }
 
     return train_dataloader, val_dataloader, test_dataloader, info
@@ -246,7 +272,7 @@ def create_sentiment():
             # xs.append(model.encoder(batch['input_ids'].to(device)).pooler_output)
             xs.append(model(batch['input_ids'].to(device)).pooler_output)
             # print(xs[0].shape)
-            ys.append(batch['labels'].to(device))
+            ys.append(batch['stars'].to(device))
         
         xs = torch.concat(xs, dim=0)
         ys = torch.concat(ys, dim=0)

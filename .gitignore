@@ -3,3 +3,4 @@ outputs
 data
 multirun
 bert-finetuned-sem_eval-english
+wandb

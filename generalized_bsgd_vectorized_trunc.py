@@ -160,4 +160,4 @@ class GeneralizedBSGDVectorizedTrunc:
             
         self.step_count += 1
 
-        return {'avg_lrs': self.curr_lrs, 'avg_step_rms': step_mags}
+        return {'avg_lrs': self.curr_lrs} #, 'avg_step_rms': step_mags}
