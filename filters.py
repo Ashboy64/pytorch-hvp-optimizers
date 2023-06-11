@@ -15,11 +15,15 @@ class MomentumFilter:
 
     def __init__(self, param_dims, momentum, device):
         self.momentum = momentum
-        self.traces = [torch.zeros(*d).to(device) for d in param_dims]
+        self.traces = [None for d in param_dims]
+        # self.traces = [torch.zeros(*d).to(device) for d in param_dims]
     
     def step(self, grad, step, V_hat, Lam_hat, p_idx):
-        self.traces[p_idx] = (1 - self.momentum) * step + \
-            self.momentum * self.traces[p_idx]
+        if self.traces[p_idx] is None:
+            self.traces[p_idx] = step 
+        else:
+            self.traces[p_idx] = (1 - self.momentum) * step + \
+                self.momentum * self.traces[p_idx]
         return self.traces[p_idx]
 
 

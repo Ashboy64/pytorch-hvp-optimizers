@@ -105,8 +105,9 @@ class SketchySGD():
 
     # @torch.no_grad()
     def step(self, loss_tensor):
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         grad_dict = torch.autograd.grad(
-            loss_tensor, self.model.parameters(), create_graph=True
+            loss_tensor, trainable_params, create_graph=True
         )
         grad_vec = self._prepare_grad(grad_dict)
         self.zero_grad()
@@ -120,7 +121,7 @@ class SketchySGD():
             # Form sketch
             def get_hvp(v):
                 hvp_dict = torch.autograd.grad(
-                        grad_vec, self.model.parameters(), 
+                        grad_vec, trainable_params, 
                         grad_outputs=v,
                         only_inputs=True, allow_unused=True, 
                         retain_graph=True
@@ -135,6 +136,9 @@ class SketchySGD():
         starting_idx = 0
         step_mag = 0.
         for p_idx, p in enumerate(self.model.parameters()):
+            if not p.requires_grad:
+                continue
+
             step = -all_steps[starting_idx : starting_idx+torch.numel(p)].reshape(*p.shape)
             p.data.add_(self.lr * step)
             starting_idx += torch.numel(p)

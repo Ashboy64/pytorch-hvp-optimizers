@@ -59,21 +59,49 @@ class ConvNet(nn.Module):
 
 
 class BertEncodedMLP:
-    def __init__(self, dataset_info, encoder_model="bert-base-uncased", encoding_dim=768, hidden_sizes=[512, 128, 64]):
+    def __init__(self, dataset_info, encoder_model="distilbert-base-uncased", freeze_encoder=False, 
+                 encoding_dim=768, hidden_sizes=[]):
         super().__init__()
 
         self.encoder = AutoModel.from_pretrained(encoder_model)
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        self.freeze_encoder = freeze_encoder
+        if freeze_encoder:
+            print(f"FREEZING ENCODER")
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+        else:
+            # 100 param groups in distilbert
+            num_to_train = 3
+            for p_idx, p in enumerate(self.encoder.parameters()):
+                if p_idx <= 99 - num_to_train:
+                    p.requires_grad = False 
+                else:
+                    print(f"Setting param {p_idx} to train. Shape: {p.shape}")
+                    p.requires_grad = True
+                # print(p_idx)
+
+            self.encoder.train()
 
         classifier_data_info = {'input_dim': (encoding_dim,), 'num_classes': dataset_info['num_classes']}
         self.classifier = MLP(classifier_data_info, hidden_sizes)
     
+    def train(self):
+        if not self.freeze_encoder:
+            self.encoder.train()
+        self.classifier.train()
+    
+    def eval(self):
+        self.encoder.eval()
+        self.classifier.eval()
+    
     def parameters(self):
-        return self.classifier.parameters()
+        if self.freeze_encoder:
+            return self.classifier.parameters()
+        return list(self.classifier.parameters()) + list(self.encoder.parameters())
     
     def __call__(self, x):
-        x = self.encoder(x).pooler_output
+        # x = self.encoder(x).pooler_output
+        x = self.encoder(x).last_hidden_state[:, 0, :]
         return self.classifier(x)
     
     def to(self, device):

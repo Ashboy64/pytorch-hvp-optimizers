@@ -76,38 +76,42 @@ class GeneralizedBSGDVectorizedTrunc:
 
         return U, Lam_hat
 
-
     def compute_newton_step(self, block_idx_info, block_Us, block_Lams, g_flat):
         if len(block_idx_info.shape) == 0:
-            return torch.Tensor().to(self.device)
+            return torch.tensor([]).to(block_idx_info.device)
         
         g = -torch.take_along_dim(g_flat, block_idx_info, dim=0)
 
-        first_term = block_Us @ ((1 / (block_Lams + self.rho)) * (block_Us.T @ g))
-        second_term = (g - block_Us@(block_Us.T@g)) / self.rho
+        first_term = block_Us @ ((1 / (block_Lams + 1e-2)) * (block_Us.T @ g))
+        second_term = (g - block_Us@(block_Us.T@g)) / 1e-2
 
         return first_term + second_term
 
 
     @torch.no_grad()
     def step(self, loss_tensor):
-        # Compute gradients
-        gs = torch.autograd.grad(
-            loss_tensor, self.model.parameters(), create_graph=True, 
-            retain_graph=True
-        )
+        update_hess = (self.step_count % self.h_recomp_interval == 0)
+
+        if update_hess:
+            # self.filterer.traces = [None for t in self.filterer.traces]
+            loss_tensor.backward(create_graph=True)
+        else:
+            loss_tensor.backward(create_graph=False)
 
         avg_lam_hats = []
         step_mags = []
 
-        for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
+        for p_idx, p in enumerate(self.model.parameters()):
+            if not p.requires_grad:
+                continue
+
+            g = p.grad
             p_size = torch.numel(p)
-            p_step = torch.zeros(p_size)
             num_hvps = min(self.num_hvps, p_size)
 
             g_flat = g.reshape(-1,)
             
-            if self.step_count % self.h_recomp_interval == 0:
+            if update_hess:
                 # Form sketch
                 def get_hvp(v):
                     return torch.autograd.grad(
@@ -142,6 +146,8 @@ class GeneralizedBSGDVectorizedTrunc:
                     uneven_inv_block_hess = \
                         self.compute_inv_block_hess(uneven_idx_info, C_inv=C_inv, sketch_T=sketch_T, nu=nu)
                     self.p_idx_to_uneven_block[p_idx] = (uneven_idx_info, *uneven_inv_block_hess)
+                
+                del sketch_T
 
             # Form approx Newton steps
             newton_step_fn = lambda idx_info, block_Us, block_Lams : self.compute_newton_step(idx_info, block_Us, block_Lams, g_flat=g_flat)

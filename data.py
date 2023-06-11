@@ -14,7 +14,7 @@ from sklearn.datasets import fetch_rcv1
 from sklearn.model_selection import train_test_split
 
 from datasets import load_dataset
-from transformers import BertTokenizer, BertModel
+from transformers import AutoTokenizer, AutoModel
 
 from models import * 
 
@@ -181,7 +181,7 @@ def load_sentiment(batch_size):
     labels = [label for label in dataset['train'].features.keys() if label not in ['ID', 'Tweet']]
     id2label = {idx:label for idx, label in enumerate(labels)}
     label2id = {label:idx for idx, label in enumerate(labels)}
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
     def preprocess_data(examples):
         # encode tweets
@@ -217,7 +217,7 @@ def load_sentiment(batch_size):
 
 def load_yelp(batch_size):
     dataset = load_dataset("codyburker/yelp_review_sampled")
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], padding="max_length", truncation=True)
@@ -236,7 +236,7 @@ def load_yelp(batch_size):
     info = {
         "encoder_dim": (768,),
         "tokenizer": tokenizer,
-        "num_classes": 6
+        "num_classes": 5
     }
 
     return train_dataloader, val_dataloader, test_dataloader, info
@@ -257,8 +257,7 @@ def create_sentiment():
             os.makedirs(os.path.join(save_path, split_name))
 
     sentiment_data = load_sentiment(8)
-    # model = BertEncodedMLP(sentiment_data[-1]).to(device)
-    model = BertModel.from_pretrained('bert-base-uncased').to(device)
+    model = AutoModel.from_pretrained('bert-base-uncased').to(device)
     for param in model.parameters():
         param.requires_grad = False
     
@@ -269,9 +268,7 @@ def create_sentiment():
         ys = []
         
         for batch in tqdm(split):
-            # xs.append(model.encoder(batch['input_ids'].to(device)).pooler_output)
             xs.append(model(batch['input_ids'].to(device)).pooler_output)
-            # print(xs[0].shape)
             ys.append(batch['stars'].to(device))
         
         xs = torch.concat(xs, dim=0)

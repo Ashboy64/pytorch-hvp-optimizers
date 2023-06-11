@@ -6,15 +6,19 @@
 
 import numpy as np
 import torch
+from functorch import vmap
 from filters import * 
 
 
 class SketchySystemSGD:
     
-    def __init__(self, model, lr=3e-4, block_rank=3, cache_interval=100,
+    def __init__(self, model, device, variant='grad_proj', lr=3e-4, block_rank=3, cache_interval=100,
                  filterer=None):
         self.lr = lr 
+        self.device = device
         self.curr_lrs = [lr for p in model.parameters()]
+
+        self.variant = variant
 
         if filterer is None:
             self.filterer = IdentityFilter()
@@ -41,9 +45,11 @@ class SketchySystemSGD:
 
     @torch.no_grad()
     def step(self, loss_tensor):
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+
         # Compute gradients
         gs = torch.autograd.grad(
-            loss_tensor, self.model.parameters(), create_graph=True, 
+            loss_tensor, trainable_params, create_graph=True, 
             retain_graph=True
         )
 
@@ -53,26 +59,26 @@ class SketchySystemSGD:
 
         for p_idx, (g, p) in enumerate(zip(gs, self.model.parameters())):
 
+            if not p.requires_grad:
+                continue
+
             if self.step_count % self.cache_interval == 0:
-                curr_block_rank = min(torch.numel(p), self.block_rank)
+                num_hvps = min(torch.numel(p), self.block_rank)
 
                 # Form sketch
-                vs = torch.randn(torch.numel(p), curr_block_rank)  # HVP vectors
+                def get_hvp(v):
+                    return torch.autograd.grad(
+                            g, p, 
+                            grad_outputs=v,
+                            only_inputs=True, allow_unused=True, 
+                            retain_graph=True
+                    )[0].reshape(-1,)
+                
+                vs = torch.randn(torch.numel(p), num_hvps).to(self.device)  # HVP vectors
                 vs = torch.linalg.qr(vs, 'reduced').Q    # Reduced / Thin QR
-
-                sketch = []
-                for i in range( curr_block_rank ):
-                    v = vs[:, i].reshape(*p.shape)
-                    hvp = torch.autograd.grad(
-                        g, p, 
-                        grad_outputs=v,
-                        only_inputs=True, allow_unused=True, 
-                        retain_graph=True
-                    )
-                    sketch.append(hvp[0].reshape(-1,))
-                sketch_T = torch.stack(sketch)
-
-                mat = sketch_T @ sketch_T.T
+                sketch_T = vmap(get_hvp)(vs.T.reshape(num_hvps, *p.shape))
+                # mat = sketch_T @ sketch_T.T
+                
                 # mat_rmsn = torch.sum(mat ** 2 / torch.numel(mat))**0.5
 
                 # eigvals = torch.linalg.eigvalsh(mat)
@@ -91,34 +97,46 @@ class SketchySystemSGD:
 
             A = sketch.T
             g = g.reshape(-1, )
-            b = vs.T @ g
+            b = -vs.T @ g
 
             # print(f"HESSIAN CONSTRAINT VIOLATION: { torch.linalg.norm(A @ g - b) }")
 
             # PERTURBATION STEP (take q = g + (grad of constraint violation)
-            # step_mod = A.T @ (A @ g - b)
-            # step_mod /= torch.linalg.norm(step_mod)
-
-            # q = g + step_mod
-            # step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
-            # q = q.reshape(*p.shape)
-
-
-            # GRAD PROJECTION STEP (currently this is working the best)
-            if mat_R is not None:
-                q = torch.linalg.solve_triangular(mat_R.T, (A @ g - b).reshape(-1,1), upper=False)
-                q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
-                q = g - A.T @ q
+            if self.variant == 'perturb':
+                step_mod = A.T @ (A @ g + b)
+                # step_mod /= torch.linalg.norm(step_mod)
+                q = -g + step_mod
                 
-                step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
-            else:
-                q = g
-                step_deviations.append( 0. )
+            # GRAD PROJECTION STEP (currently this is working the best)
+            elif self.variant == 'grad_proj':
+                if mat_R is not None:
+                    q = torch.linalg.solve_triangular(mat_R.T, (-A @ g - b).reshape(-1,1), upper=False)
+                    q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
+                    q = -g - A.T @ q
+
+                    if torch.any( torch.isnan(q) ):
+                        q = -g
+                else:
+                    q = -g
+            
+            elif self.variant == 'min_norm':
+                if mat_R is not None:
+                    q = torch.linalg.solve_triangular(mat_R.T, b.reshape(-1,1), upper=False)
+                    q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
+                    q = A.T @ q
+
+                else:
+                    q = -g
+                    step_deviations.append( 0. )
             
             # Constrain norm to prevent blowup
             q_norm = torch.linalg.norm(q)
             if q_norm > 1.:
                 q /= q_norm
+            
+            # Log deviation from SGD
+            step_deviations.append( (torch.sum((q + g)**2) / torch.numel(q))**0.5 )
+
             
             # Interpolate between gradient and computed update
             # q = (q + g) / 2.
@@ -148,29 +166,11 @@ class SketchySystemSGD:
             # step_grad_sims.append( torch.dot(q, g) / ( torch.linalg.norm(g) * torch.linalg.norm(q) ) )
 
             q = q.reshape(*p.shape)
-            
-
-            # MIN NORM GRADIENT STEP
-            # if mat_R is not None:
-            #     q = torch.linalg.solve_triangular(mat_R.T, b.reshape(-1,1), upper=False)
-            #     q = torch.linalg.solve_triangular(mat_R, q, upper=True).reshape(-1,)
-            #     q = A.T @ q
-
-            #     step_deviations.append( (torch.sum((q - g)**2) / torch.numel(q))**0.5 )
-            # else:
-            #     q = g
-            #     step_deviations.append( 0. )
-            
-            # q_norm = torch.linalg.norm(q)
-            # if q_norm > 1.:
-            #     q /= q_norm
-            # q = q.reshape(*p.shape)
-            
-
             q = self.filterer.step(g, q, None, None, p_idx).reshape(*p.shape)
 
-            p.data.add_(-self.curr_lrs[p_idx] * q)
+            p.data.add_(self.curr_lrs[p_idx] * q)
             step_mags.append( torch.linalg.norm(-self.curr_lrs[p_idx] * q) )
         
         self.step_count += 1
-        return {'avg_step_mags': step_mags, 'avg_lrs': self.curr_lrs, 'avg_step_deviations': step_deviations, 'avg_grad_sims': step_grad_sims}
+        return {}
+        # return {'avg_step_mags': step_mags, 'avg_lrs': self.curr_lrs, 'avg_step_deviations': step_deviations, 'avg_grad_sims': step_grad_sims}

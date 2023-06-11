@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+from transformers import AutoModelForSequenceClassification
+
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 
 from utils import * 
@@ -29,6 +31,7 @@ from agd import *
 
 from filters import * 
 
+
 device = torch.device('cpu')
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -36,6 +39,8 @@ elif torch.backends.mps.is_available():
     device = torch.device('mps')
 print(f"Device: {device}")
 
+
+LOG_INTERVAL = 250
 
 DATASETS = {'mnist': load_mnist, 
             'cifar-10': load_cifar10, 
@@ -142,9 +147,9 @@ def evaluate_single(model, dataloader, criterion):
             batch_y = batch[1].to(device)
         else:
             batch_x = batch['input_ids'].to(device)
-            batch_y = batch['stars'].to(device) # - 1
+            batch_y = batch['stars'].to(device) - 1
         
-        logits = model(batch_x)
+        logits = model(batch_x) #.logits
         val_loss += criterion(logits, batch_y).item() * batch_x.shape[0]
 
         if len(batch_y.shape) == 1:
@@ -176,8 +181,10 @@ def evaluate_single(model, dataloader, criterion):
 
 @torch.no_grad()
 def evaluate(model, val_loader, test_loader, criterion):
+    # model.eval()
     val_metrics = evaluate_single(model, val_loader, criterion)
     test_metrics = evaluate_single(model, test_loader, criterion)
+    # model.train()
     return val_metrics, test_metrics
 
 
@@ -202,14 +209,15 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
     for epoch_idx in range(num_epochs):
         for batch_idx, batch in enumerate(tqdm(train_loader)):
         # for batch_idx, batch in enumerate(train_loader):
+
             if type(batch) in [tuple, list] and len(batch) == 2:
                 batch_x = batch[0].to(device)
                 batch_y = batch[1].to(device)
             else:
                 batch_x = batch['input_ids'].to(device)
-                batch_y = batch['stars'].to(device) # - 1
+                batch_y = batch['stars'].to(device) - 1
             
-            logits = model(batch_x)
+            logits = model(batch_x) #.logits
             train_loss = criterion(logits, batch_y)
 
             if torch.any(torch.isnan(train_loss)):
@@ -222,6 +230,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
                 optimizer.step()
                 step_info = {} 
             else:
+                # step_info = optimizer.step_1hvp(train_loss)
                 step_info = optimizer.step(train_loss)
 
             running_loss += train_loss.item()
@@ -248,7 +257,7 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
                 
                 # to_log['test_acc_over_epoch'] = test_acc 
 
-            if batch_idx % 250 == 0:
+            if batch_idx % LOG_INTERVAL == 0:
                 if len(to_log) == 0:
                     val_metrics, test_metrics = evaluate(model, val_loader, test_loader, criterion)
                     val_acc = val_metrics['acc']
@@ -271,7 +280,10 @@ def train(model, train_loader, val_loader, test_loader, opt_config, filter_confi
 
                 if verbose:
                     out_str = f'Epoch {epoch_idx} Batch num {batch_idx}: '
-                    out_str = out_str + f'train_loss={running_loss / 100:.3f}, '
+                    if batch_idx == 0:
+                        out_str = out_str + f'train_loss={running_loss:.3f}, '
+                    else:
+                        out_str = out_str + f'train_loss={running_loss / LOG_INTERVAL :.3f}, '
                     out_str = out_str + f'val_loss={val_metrics["loss"]:.3f}, val_acc={val_acc:.3f}, '
                     out_str = out_str + f'test_loss={test_metrics["loss"]:.3f}, test_acc={test_acc:.3f}, '
                     print(out_str)
@@ -329,6 +341,9 @@ def main(cfg):
     print(f"test set size: {len(test_loader)}")
 
     model = MODELS[cfg.model](dataset_info).to(device)
+    # model = AutoModelForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=5).to(device)
+    model.eval()        # To stop from using dropout for batching purposes
+
     loss_fn = LOSSES[cfg.loss]
     
     total_start_time = time()
@@ -347,6 +362,43 @@ def main(cfg):
     wandb.finish()
 
 
+def main_huggingface():
+    dataset = load_dataset("codyburker/yelp_review_sampled")
+    tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], padding="max_length", truncation=True)
+
+    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+    tokenized_datasets.set_format("torch")
+
+    small_train = tokenized_datasets["train"].shuffle(seed=42).select(range(10000))
+    small_val = tokenized_datasets["train"].shuffle(seed=42).select(range(10000, 11000))
+    small_test = tokenized_datasets["test"].shuffle(seed=42).select(range(1000))
+
+    # model = AutoModelForSequenceClassification.from_pretrained("bert-base-cased", num_labels=5)
+    # model = AutoModelForSequenceClassification('distilbert-base-uncased', num_labels=5)
+
+    from transformers import TrainingArguments, Trainer
+
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        predictions = np.argmax(logits, axis=-1)
+        return metric.compute(predictions=predictions, references=labels)
+
+    training_args = TrainingArguments(output_dir="test_trainer", evaluation_strategy="epoch")
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=small_train,
+        eval_dataset=small_test,
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train()
+
+
 if __name__ == '__main__':
     main()
+    # main_huggingface()
 
