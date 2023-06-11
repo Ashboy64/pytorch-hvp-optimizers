@@ -4,3 +4,4 @@ data
 multirun
 bert-finetuned-sem_eval-english
 wandb
+.DS_Store
